@@ -33,6 +33,7 @@
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "runtimeobject.lib")
 
 // --- WinRT and Dispatcher Queue Management ---
 static std::atomic<int> g_wgc_init_count = 0;
