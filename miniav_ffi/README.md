@@ -487,7 +487,9 @@ await context.startCapture((buffer, userData) {
   // Process buffer data
   final videoData = buffer.data as MiniAVVideoBuffer;
   
-  // Access raw pixel planes
+  // Access raw pixel planes — CPU path only
+  // (buffer.contentType == MiniAVBufferContentType.cpu). On a GPU-path buffer
+  // these are non-null but EMPTY; use videoData.nativeHandles instead.
   final plane0 = videoData.planes[0]; // Y plane for YUV, or RGB data
   final plane1 = videoData.planes[1]; // U plane for YUV
   final plane2 = videoData.planes[2]; // V plane for YUV
@@ -499,15 +501,33 @@ await context.startCapture((buffer, userData) {
 
 ### GPU Integration
 
-Buffers can contain GPU handles for zero-copy workflows:
+Buffers can contain GPU handles for zero-copy workflows. **`buffer.contentType`
+is the discriminator** — never test `planes[0] != null`, because on the GPU path
+`planes[0]` is a non-null but *empty* `Uint8List` (stride 0) and that test takes
+the CPU branch.
 
 ```dart
 if (buffer.contentType == MiniAVBufferContentType.gpuD3D11Handle) {
-  // Direct GPU texture handle (Windows)
-  final gpuHandle = videoData.planes[0];
-  // Pass to minigpu or other GPU library
+  // Windows zero-copy: the shared NT HANDLE lives in nativeHandles[0]
+  // (a plain Dart int), NOT in planes[0].
+  final videoData = buffer.data as MiniAVVideoBuffer;
+  final int handleAddr = videoData.nativeHandles[0] as int;
+
+  // Import it (e.g. minigpu importVideoFrame / OpenSharedResource1) …
+  // … and only THEN release the buffer.
+  MiniAV.releaseBufferSync(buffer);
 }
 ```
+
+**Handle ownership (Windows GPU path).** miniav owns the shared NT handle and
+closes it inside `MiniAV.releaseBuffer` / `releaseBufferSync`:
+
+- Do **not** call `CloseHandle` on it yourself — that is a double-close.
+- Finish importing it *before* releasing the buffer; it is invalid the moment
+  release returns. (`minigpu`'s `importVideoFrame` satisfies this: it opens the
+  shared resource and copies into its own texture before returning.)
+- Release **every** buffer, including ones you skip — the handle is only closed
+  on release, so a dropped buffer leaks one kernel handle per frame.
 
 ## GPU Interop with minigpu
 
@@ -519,13 +539,30 @@ Every `MiniAVVideoBuffer` delivered in a capture callback carries the fields tha
 
 | Field | Role |
 |-------|------|
-| `contentType` | `cpu` = copy into GPU texture; `gpuD3D11Handle` = zero-copy shared texture (Windows) |
+| `contentType` | **The** CPU/GPU discriminator: `cpu` = copy into GPU texture; `gpuD3D11Handle` = zero-copy shared texture (Windows). Never branch on `planes[0] != null` instead |
 | `pixelFormat` | `rgba32` or `nv12` are supported by minigpu on all platforms |
 | `width` / `height` | Frame dimensions in pixels |
-| `planes[n]` | Raw `Uint8List` pixel data (CPU path) — one plane for RGBA, two for NV12 |
-| `strideBytes[n]` | Row stride in bytes per plane |
-| `nativeHandles[n]` | Platform GPU handle (D3D11 texture pointer, DMA-BUF fd, etc.) for GPU path |
-| `nativeFence` | Sync fence for GPU-path handoff (D3D11 fence, sync_fd, or Metal shared event) |
+| `planes[n]` | Raw `Uint8List` pixel data — **CPU path only**. On the GPU path these are non-null but EMPTY (length 0) |
+| `strideBytes[n]` | Row stride in bytes per plane; **0 on the GPU path** |
+| `nativeHandles[n]` | **GPU path**: platform GPU handle. Windows = shared NT HANDLE as a plain `int` in `nativeHandles[0]`; also Metal texture ptr / `AHardwareBuffer*`. Owned by miniav, closed by `releaseBuffer` |
+| `dmabufFds[n]` | Linux GPU path: per-plane DMA-BUF fds (-1 if n/a) |
+| `nativeFence` | **Unimplemented — always all-zero/sentinel.** See below |
+
+#### `nativeFence` is not implemented (0.6.0)
+
+`MiniAVNativeFence` is a placeholder: no backend populates it, so
+`d3d11FencePtr`, `metalSharedEventPtr` and `metalFenceValue` are **always `0`**
+and `syncFd` is always `-1`. Passing `buffer.nativeFence.d3d11FencePtr` to a
+consumer is harmless but always means "no fence".
+
+What the Windows screen/camera backends do instead of a real `ID3D11Fence`:
+before exposing the shared handle they insert a `D3D11_QUERY_EVENT`, `Flush()`,
+and **CPU busy-poll for at most ~16 ms**. If the query has not signalled by
+then they log a rate-limited warning and **hand the frame over anyway** — so
+under GPU contention a consumer can receive a texture whose producer-side copy
+has not finished (torn or black frame). A consumer that needs a hard guarantee
+must synchronise on its own device (e.g. copy under its own fence after
+`OpenSharedResource1`). Tracked in `miniav_c/NATIVE_AUDIT.md` (P2 §1).
 
 ### Camera → GPU texture → RGBA readback (CPU path)
 
