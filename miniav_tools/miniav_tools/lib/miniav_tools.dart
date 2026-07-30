@@ -21,6 +21,7 @@ export 'package:miniav_tools_platform_interface/miniav_tools_platform_interface.
 export 'src/encoder.dart';
 export 'src/audio_encoder.dart';
 export 'src/audio_decoder.dart';
+export 'src/audio_source.dart';
 export 'src/decoder.dart';
 export 'src/muxer.dart';
 export 'src/demuxer.dart';

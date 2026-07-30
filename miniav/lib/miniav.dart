@@ -88,7 +88,16 @@ class MiniAV {
   /// Dispose of all MiniAV resources
   static void dispose() => _platform.dispose();
 
-  /// Release a buffer previously obtained from MiniAV
+  /// Release a buffer previously obtained from MiniAV.
+  ///
+  /// Must be called exactly once for every buffer delivered to a capture
+  /// callback, including buffers you skip or drop.
+  ///
+  /// **GPU path:** this also closes the platform GPU handle exposed in
+  /// `MiniAVVideoBuffer.nativeHandles[0]` (on Windows, the shared NT HANDLE).
+  /// miniav owns that handle — do not close it yourself — and it becomes
+  /// invalid as soon as this call runs. Complete any import
+  /// (`OpenSharedResource1`, minigpu `importVideoFrame`, …) *before* releasing.
   static Future<void> releaseBuffer(MiniAVBuffer buffer) async {
     return _platform.releaseBuffer(buffer);
   }

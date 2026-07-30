@@ -2,6 +2,13 @@
 
 ## 0.7.0
 
+- Documented the GPU buffer handoff contract on the types that carry it:
+  `MiniAVBufferContentType` is **the** CPU/GPU discriminator (`planes[0]` is
+  non-null but empty on the GPU path), `MiniAVVideoBuffer.nativeHandles[0]`
+  holds the Windows shared NT HANDLE as an `int` and is **owned and closed by
+  miniav on buffer release**, and `MiniAVNativeFence` is **unimplemented** —
+  every field is always its sentinel and must not be read as "GPU work done".
+
 - `MiniScreenPlatformInterface.setIOSAppGroup(String)` — registers the App
   Group for iOS system-wide broadcast capture; default implementation throws
   `UnsupportedError` on platforms without it.

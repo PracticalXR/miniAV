@@ -43,6 +43,7 @@ export 'src/framing/adts_container.dart'
 export 'src/framing/mp4_container.dart' show Mp4Demuxer, Mp4Muxer;
 export 'src/sw_audio/sw_audio_backend.dart' show SwAudioBackend;
 export 'src/sw_audio/sw_audio_decoder.dart' show SwAudioDecoder;
+export 'src/sw_audio/sw_audio_stream_decoder.dart' show SwAudioStreamDecoder;
 export 'src/frame_convert.dart'
     show
         CpuFrameConverter,

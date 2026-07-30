@@ -25,6 +25,13 @@ typedef struct DXGIFrameReleasePayload {
     struct {                               // For GPU
       ID3D11Texture2D *shared_gpu_texture; // AddRef'd (texture from which
                                            // handle was created)
+      // Shared NT HANDLE handed to the app as planes[0].data_ptr.
+      // OWNERSHIP: miniav owns it and CloseHandle()s it in
+      // dxgi_release_buffer — the app must NOT close it and must finish its
+      // import (OpenSharedResource1 / equivalent) BEFORE calling
+      // MiniAV_ReleaseBuffer. It used to not be stored here at all, which
+      // made it unclosable: one leaked kernel handle per captured frame.
+      HANDLE shared_handle;
     } gpu;
   };
 } DXGIFrameReleasePayload;
@@ -1063,8 +1070,16 @@ static MiniAVResultCode dxgi_release_buffer(MiniAVScreenContext *ctx,
                        "DXGI: Released shared GPU texture. Ref count: %lu",
                        ref_count);
           }
-          // The shared handle should be closed by the application,
-          // but we can't verify that here
+          // OWNERSHIP: miniav closes the shared NT handle here (see the
+          // struct comment). The app must have completed its import before
+          // calling MiniAV_ReleaseBuffer and must NOT close it itself.
+          if (frame_payload->gpu.shared_handle) {
+            miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                       "DXGI: Closing GPU shared handle %p.",
+                       frame_payload->gpu.shared_handle);
+            CloseHandle(frame_payload->gpu.shared_handle);
+            frame_payload->gpu.shared_handle = NULL;
+          }
         } else {
           miniav_log(MINIAV_LOG_LEVEL_WARN,
                      "DXGI: Unknown payload type in release_buffer: %d",
@@ -1542,6 +1557,8 @@ static DWORD WINAPI dxgi_capture_thread_proc(LPVOID param) {
       frame_release_payload_app->type = MINIAV_OUTPUT_PREFERENCE_GPU;
       frame_release_payload_app->gpu.shared_gpu_texture =
           texture_for_payload_ref;
+      // miniav owns the handle from here; dxgi_release_buffer closes it.
+      frame_release_payload_app->gpu.shared_handle = shared_handle_for_app;
     } else {
       frame_release_payload_app->type = MINIAV_OUTPUT_PREFERENCE_CPU;
       frame_release_payload_app->cpu.staging_texture_for_frame =

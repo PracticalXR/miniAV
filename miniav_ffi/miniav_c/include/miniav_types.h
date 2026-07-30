@@ -179,6 +179,7 @@ typedef enum {
   MINIAV_INPUT_TYPE_KEYBOARD = 0x01,
   MINIAV_INPUT_TYPE_MOUSE = 0x02,
   MINIAV_INPUT_TYPE_GAMEPAD = 0x04,
+  MINIAV_INPUT_TYPE_MOTION = 0x08,  // IMU / device motion (see MiniAVMotionEvent)
 } MiniAVInputType;
 
 // Keyboard action
@@ -245,6 +246,63 @@ typedef struct {
   bool connected;
 } MiniAVGamepadEvent;
 
+// --- Motion / IMU Types ---
+//
+// ONE canonical convention every backend converts to at its native boundary
+// (see INPUT_LAYER_PLAN.md §1.5): gyro rad/s right-handed; accel m/s^2 including
+// gravity (reaction-force sign, face-up z ~= +9.81); quaternions scalar-LAST
+// [x, y, z, w], right-handed, gravity-down. `screen_orientation` is
+// `orientation` remapped into the current display frame — the field the client
+// parallax path consumes so tilt maps the same way in portrait and landscape.
+// These structs mirror the Dart MiniAVMotionEvent field-for-field so ffigen
+// binds them directly.
+
+typedef struct {
+  double x, y, z;
+} MiniAVVec3;
+
+typedef struct {
+  double x, y, z, w;  // scalar-LAST
+} MiniAVQuat;
+
+// How the backend prepares `screen_orientation`.
+typedef enum {
+  MINIAV_MOTION_MODE_RAW_DEVICE_FRAME = 0,     // screen_orientation == orientation
+  MINIAV_MOTION_MODE_FUSED_SCREEN_STABLE = 1,  // remapped into the display frame
+} MiniAVMotionMode;
+
+// Reference frame the fused attitude is relative to.
+typedef enum {
+  MINIAV_ATTITUDE_REF_RELATIVE_DRIFT_FREE = 0,  // relative to start, drift-free
+  MINIAV_ATTITUDE_REF_ABSOLUTE_MAG_NORTH = 1,   // absolute, yaw referenced to N
+} MiniAVAttitudeRef;
+
+// Current display rotation. Values are ordinals (match the Dart enum), NOT
+// degrees: 0=0deg, 1=90deg, 2=180deg, 3=270deg.
+typedef enum {
+  MINIAV_DISPLAY_ROTATION_0 = 0,
+  MINIAV_DISPLAY_ROTATION_90 = 1,
+  MINIAV_DISPLAY_ROTATION_180 = 2,
+  MINIAV_DISPLAY_ROTATION_270 = 3,
+} MiniAVDisplayRotation;
+
+// A decoded IMU / motion sample. Field order mirrors Dart MiniAVMotionEvent.
+typedef struct {
+  uint64_t timestamp_us;         // A/V master clock, microseconds
+  MiniAVVec3 gyro;               // rad/s, right-handed
+  MiniAVVec3 accel;              // m/s^2, INCLUDES gravity
+  MiniAVVec3 linear_accel;       // m/s^2, gravity removed (zero if un-fused)
+  MiniAVVec3 gravity;            // m/s^2, gravity estimate
+  MiniAVVec3 magnetometer;       // uT; valid only when has_magnetometer
+  bool has_magnetometer;
+  MiniAVQuat orientation;        // fused attitude, device frame
+  MiniAVAttitudeRef ref;
+  double heading_deg;            // 0..360 toward north; valid when has_heading
+  bool has_heading;
+  MiniAVQuat screen_orientation; // attitude remapped into the display frame
+  MiniAVDisplayRotation display; // current display rotation
+} MiniAVMotionEvent;
+
 // Typed input callbacks
 typedef void (*MiniAVKeyboardCallback)(const MiniAVKeyboardEvent *event,
                                        void *user_data);
@@ -252,8 +310,11 @@ typedef void (*MiniAVMouseCallback)(const MiniAVMouseEvent *event,
                                     void *user_data);
 typedef void (*MiniAVGamepadCallback)(const MiniAVGamepadEvent *event,
                                       void *user_data);
+typedef void (*MiniAVMotionCallback)(const MiniAVMotionEvent *event,
+                                     void *user_data);
 
-// Input configuration
+// Input configuration. NOTE: motion fields are APPENDED so existing
+// keyboard/mouse/gamepad byte offsets are unchanged (ABI-additive).
 typedef struct {
   uint32_t input_types;         // Bitmask of MiniAVInputType
   uint32_t mouse_throttle_hz;   // 0 = no throttle, default = 60
@@ -262,6 +323,9 @@ typedef struct {
   MiniAVMouseCallback mouse_callback;
   MiniAVGamepadCallback gamepad_callback;
   void *user_data;
+  uint32_t motion_rate_hz;      // 0 = default (60); web/most sensors cap at 60
+  MiniAVMotionMode motion_mode; // how screen_orientation is prepared
+  MiniAVMotionCallback motion_callback;
 } MiniAVInputConfig;
 
 // --- Logging ---

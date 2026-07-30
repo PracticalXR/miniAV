@@ -122,6 +122,14 @@ class DecoderConfig {
   /// self-contained (Annex-B).
   final Uint8List? extraData;
 
+  /// Coded-dims HINT (`null` = unknown). Most decoders read dims from the
+  /// bitstream, but some require them up front — the MF HEVC decoder MFT
+  /// needs a frame size on its input media type before it will accept any
+  /// input at all. Callers that know the track dims (demuxer, wire header)
+  /// should pass them; decoders may ignore.
+  final int? width;
+  final int? height;
+
   final HwAccelPreference hwAccel;
 
   /// Preferred output pixel format. Decoder may ignore if not supported.
@@ -137,6 +145,8 @@ class DecoderConfig {
     required this.codec,
     this.customCodecName,
     this.extraData,
+    this.width,
+    this.height,
     this.hwAccel = HwAccelPreference.preferred,
     this.outputPixelFormat = MiniAVPixelFormat.nv12,
     this.requestGpuOutput = false,
@@ -150,6 +160,8 @@ class DecoderConfig {
     VideoCodec? codec,
     String? customCodecName,
     Uint8List? extraData,
+    int? width,
+    int? height,
     HwAccelPreference? hwAccel,
     MiniAVPixelFormat? outputPixelFormat,
     bool? requestGpuOutput,
@@ -158,6 +170,8 @@ class DecoderConfig {
     codec: codec ?? this.codec,
     customCodecName: customCodecName ?? this.customCodecName,
     extraData: extraData ?? this.extraData,
+    width: width ?? this.width,
+    height: height ?? this.height,
     hwAccel: hwAccel ?? this.hwAccel,
     outputPixelFormat: outputPixelFormat ?? this.outputPixelFormat,
     requestGpuOutput: requestGpuOutput ?? this.requestGpuOutput,

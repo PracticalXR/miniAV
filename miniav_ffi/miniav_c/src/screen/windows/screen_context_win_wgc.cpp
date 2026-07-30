@@ -135,14 +135,32 @@ typedef struct WGCFrameReleasePayload {
   MiniAVOutputPreference actual_output_preference;
   ID3D11Texture2D
       *gpu_texture_to_release; // AddRef'd texture (original or shared copy)
-  HANDLE gpu_shared_handle_to_close; // Handle given to app (app should close,
-                                     // but we track)
+  // Shared NT HANDLE handed to the app as planes[0].data_ptr on the GPU path.
+  // OWNERSHIP: miniav owns it and CloseHandle()s it in wgc_release_buffer —
+  // the app must NOT close it (double-close) and must finish importing it
+  // (OpenSharedResource1 / equivalent) BEFORE calling MiniAV_ReleaseBuffer.
+  HANDLE gpu_shared_handle_to_close;
 
   ID3D11Texture2D *cpu_staging_texture_to_unmap_release; // AddRef'd
   ID3D11DeviceContext *d3d_context_for_unmap;            // AddRef'd if non-null
   UINT subresource_for_unmap;
 
 } WGCFrameReleasePayload;
+
+// Live count of shared NT handles handed to the app and not yet closed by
+// wgc_release_buffer. Guards against the close silently disappearing again:
+// wgc_destroy_platform logs loudly if this is not back to zero. Also bounds
+// the damage of an app that never releases buffers (rate-limited warning).
+static std::atomic<long> g_wgc_outstanding_shared_handles{0};
+
+// Close a shared NT handle that was counted by the +1 next to CreateSharedHandle.
+// Every exit path for a handed-out handle MUST go through here.
+static void wgc_close_shared_handle(HANDLE h) {
+  if (!h)
+    return;
+  CloseHandle(h);
+  g_wgc_outstanding_shared_handles.fetch_sub(1, std::memory_order_relaxed);
+}
 
 // Available since Windows 10 1803; guard for older SDK headers.
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
@@ -575,6 +593,24 @@ static MiniAVResultCode wgc_destroy_platform(MiniAVScreenContext *ctx) {
     wgc_ctx->stop_event_handle = NULL;
   }
   DeleteCriticalSection(&wgc_ctx->critical_section);
+
+  // Loud, non-silent guard for the handle-ownership contract (see
+  // wgc_close_shared_handle). If this is non-zero the app dropped buffers
+  // without MiniAV_ReleaseBuffer, or a future edit removed the close.
+  // The counter is process-global, so only assert on the LAST live WGC
+  // context (g_wgc_init_count is one-per-context and is decremented by
+  // shutdown_winrt_for_wgc() below).
+  if (g_wgc_init_count.load() <= 1) {
+    const long outstanding =
+        g_wgc_outstanding_shared_handles.load(std::memory_order_relaxed);
+    if (outstanding != 0) {
+      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                 "WGC: %ld GPU shared NT handle(s) still open at context "
+                 "destroy — leaked. Every captured GPU buffer must be passed "
+                 "to MiniAV_ReleaseBuffer.",
+                 outstanding);
+    }
+  }
 
   miniav_free(wgc_ctx);
   ctx->platform_ctx = NULL;
@@ -1347,11 +1383,18 @@ static MiniAVResultCode wgc_release_buffer(MiniAVScreenContext *ctx,
                        "WGC: Released GPU texture for payload. Ref count: %lu",
                        ref_count);
           }
+          // OWNERSHIP: miniav closes the shared NT handle here. The app must
+          // have completed its import (OpenSharedResource1 / minigpu
+          // mgpuImportVideoFrame, which copies into a private texture before
+          // returning) before calling MiniAV_ReleaseBuffer. Leaving this to
+          // the app leaked one kernel handle per captured frame — every known
+          // caller silently never closed it.
           if (frame_payload->gpu_shared_handle_to_close) {
-            miniav_log(
-                MINIAV_LOG_LEVEL_DEBUG,
-                "WGC: App is responsible for closing GPU shared handle %p.",
-                frame_payload->gpu_shared_handle_to_close);
+            miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                       "WGC: Closing GPU shared handle %p.",
+                       frame_payload->gpu_shared_handle_to_close);
+            wgc_close_shared_handle(frame_payload->gpu_shared_handle_to_close);
+            frame_payload->gpu_shared_handle_to_close = NULL;
           }
         } else {
           miniav_log(MINIAV_LOG_LEVEL_WARN,
@@ -1771,6 +1814,24 @@ static void wgc_on_frame_arrived(
                                       // shared
             texture_for_payload_ref_com->AddRef(); // AddRef for payload
             processed_as_gpu = true;
+            // Counted now; every close below goes through
+            // wgc_close_shared_handle() so the +1/-1 stay balanced.
+            const long outstanding =
+                g_wgc_outstanding_shared_handles.fetch_add(
+                    1, std::memory_order_relaxed) +
+                1;
+            if (outstanding > 256) {
+              static ULONGLONG s_last_leak_warn_ms = 0;
+              ULONGLONG now_ms = GetTickCount64();
+              if (now_ms - s_last_leak_warn_ms > 2000) {
+                s_last_leak_warn_ms = now_ms;
+                miniav_log(MINIAV_LOG_LEVEL_WARN,
+                           "WGC: %ld GPU shared handles outstanding — the app "
+                           "is not calling MiniAV_ReleaseBuffer promptly "
+                           "(handles are closed on release).",
+                           outstanding);
+              }
+            }
             miniav_log(MINIAV_LOG_LEVEL_DEBUG,
                        "WGC: GPU shared handle %p created from texture %p.",
                        shared_handle_for_app,
@@ -1847,6 +1908,10 @@ static void wgc_on_frame_arrived(
           mapped_rect_cpu.RowPitch * buffer->data.video.info.height;
       texture_for_payload_ref_com = per_frame_staging_texture_com;
     } else { // GPU Path successful
+      // NOTE: buffer->native_fence is deliberately left zeroed — miniav never
+      // creates an ID3D11Fence. The synchronisation actually performed is the
+      // D3D11_QUERY_EVENT busy-poll above, which PROCEEDS ON TIMEOUT. See
+      // miniav_buffer.h `native_fence` and NATIVE_AUDIT.md P2 §1.
       buffer->content_type = MINIAV_BUFFER_CONTENT_TYPE_GPU_D3D11_HANDLE;
 
       // Set up single plane for GPU texture
@@ -1917,8 +1982,8 @@ static void wgc_on_frame_arrived(
                "WGC: Error in on_frame_arrived: %ls (0x%08X)",
                ex.message().c_str(), ex.code().value);
     // Cleanup partially created resources
-    if (shared_handle_for_app) // From GPU path attempt
-      CloseHandle(shared_handle_for_app);
+    if (shared_handle_for_app) // From GPU path attempt (counted at creation)
+      wgc_close_shared_handle(shared_handle_for_app);
 
     if (frame_payload_app) {
       // Release any D3D textures held by the payload before freeing the struct
@@ -1955,7 +2020,7 @@ static void wgc_on_frame_arrived(
     miniav_log(MINIAV_LOG_LEVEL_ERROR,
                "WGC: Unknown error in on_frame_arrived.");
     if (shared_handle_for_app)
-      CloseHandle(shared_handle_for_app);
+      wgc_close_shared_handle(shared_handle_for_app);
 
     if (frame_payload_app) {
       if (frame_payload_app->cpu_staging_texture_to_unmap_release) {

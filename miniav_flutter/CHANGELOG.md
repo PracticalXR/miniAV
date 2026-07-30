@@ -1,3 +1,7 @@
+## 0.7.0
+
+## 1.0.0
+
 ## 0.6.0
 
 - add Android MediaProjection consent helper (`MiniAVAndroidScreenConsent`):

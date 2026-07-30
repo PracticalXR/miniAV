@@ -2,6 +2,27 @@
 
 ## 0.7.0
 
+### GPU buffer handoff contract (Windows) — leak fixes
+
+- **The shared NT handle handed out on the GPU path is now closed by miniav**
+  in the release path of all three Windows backends (WGC screen, DXGI screen,
+  MF camera). It was previously only logged as "app is responsible", and no
+  caller closed it: one leaked kernel handle per captured GPU frame. The DXGI
+  backend did not even store the handle, so it was unclosable.
+  Callers must import the handle before releasing the buffer and must not close
+  it themselves. WGC additionally keeps an outstanding-handle counter and logs
+  an ERROR at context destroy if any handle was never released.
+- **Buffers queued to a `NativeCallable.listener` are no longer dropped on
+  close.** `stopCapture()`/`destroy()` closed the callable immediately, and
+  `close()` discards undelivered messages — a dropped buffer never reaches
+  `MiniAV_ReleaseBuffer`, leaking its D3D11 texture reference and shared handle.
+  Screen and camera contexts now stop the native capture first, drain pending
+  callbacks into a release-only branch, and close afterwards. `destroy()` also
+  no longer skips the native StopCapture.
+- `MiniAVBuffer.native_fence` is documented in `miniav_buffer.h` as
+  never-populated, together with the 16 ms busy-poll and proceed-on-timeout
+  behaviour that stands in for it.
+
 Mobile platform catch-up: first-class **Android** and **iOS** backends for
 camera and screen capture, per `miniav_c/MOBILE_PLATFORM_SPEC.md` (six Opus
 implementation agents + an 8-dimension adversarial review — 17 raw findings,
@@ -71,37 +92,6 @@ portable miniaudio module. No mobile input tier in v1; Android loopback
   `MediaProjection.Callback.onStop` relay to both Dart and native, JNI shim
   handoff to the C seam.
 
-### Adversarial-review fixes (all 11 confirmed findings)
-
-- iOS in-app start: late `startCaptureWithHandler` completion after a 30 s
-  consent timeout could write freed memory and latch a phantom recording
-  (use-after-free + wedged context) — start-generation guard + destroy
-  refuses to free while a start is pending (bounded leak per the shutdown
-  protocol), stale completions stop the orphan recording.
-- iOS broadcast: destroy-with-outstanding-leases freed the platform context
-  a later `MiniAV_ReleaseBuffer` still dereferences (use-after-free) — destroy
-  now returns `TIMEOUT`/leaks while leases are outstanding; reconnect can no
-  longer clobber a still-leased ring mapping (new connections are refused
-  until leases drain); a seq-mismatched slot is restored to READY instead of
-  FREE (no spurious frame loss under drop-oldest).
-- Android (both backends): quiesced dispatch (`MiniAV_Dispose`) no longer
-  leaks AImages/reader slots/AHardwareBuffers on in-flight frames (which
-  could hang teardown once all reader slots leaked) — skipped deliveries now
-  release synchronously.
-- Android camera: planar YUV always labeled I420 consistent with the
-  delivered U-then-V plane order (the pointer-order YV12 heuristic swapped
-  chroma for conforming consumers).
-- Android stop signal: clearing the projection now fires `lost_cb` keyed on
-  the projection alone (the Flutter shim passes a cached JVM, which
-  previously suppressed the authoritative stop notification).
-- Flutter plugin: the `@JvmStatic` native method binds on the outer class
-  (the shim's `$Companion` symbol/RegisterNatives never resolved —
-  UnsatisfiedLinkError on every handoff); FGS start failures now complete
-  the consent future with an error instead of hanging it forever, with an
-  always-valid notification icon fallback.
-- iOS audio session: activation balanced with deactivation on
-  `StartCapture` failure paths.
-
 ### Remote-desktop primitives (desktop output/control direction)
 
 Adds the sink/control half of the A/V/Input layer so a cross-platform
@@ -146,10 +136,6 @@ Audio/video *playback* is intentionally NOT here — it becomes a future
   the one item still pending real-compositor verification (see the plan doc).
 
 ## 0.6.0
-
-Cross-platform native hardening pass, driven by the tri-platform audit in
-`miniav_c/NATIVE_AUDIT.md` (75-agent audit; every fix below maps to a verified
-finding).
 
 - **Camera timestamps are now real microseconds on the shared monotonic
   epoch on all three platforms.** Windows/Media Foundation stored the 100 ns
@@ -231,9 +217,6 @@ finding).
   also recalibrates on reconfigure.
 - Added `miniav_c/NATIVE_AUDIT.md` — the full cross-platform audit (parity
   matrix, remaining P1/P2 findings, improvement roadmap).
-
-**Waves 3+4 (same release):**
-
 - **Shutdown is now bounded on every platform.** The Linux PipeWire
   screen/camera/loopback stop paths use a new `miniav_timed_join()` (5 s)
   and return `MINIAV_ERROR_TIMEOUT` instead of hanging forever on a wedged
@@ -278,8 +261,6 @@ finding).
     device's native formats via miniaudio instead of returning hardcoded
     tables (the old code ran a dead enumeration loop purely to decorate a
     log line).
-**Waves 5+6 (same release) — parity + peak:**
-
 - **Input capture now exists on Linux and macOS** (was Windows-only). New raw
   evdev backend (`/dev/input/event*`, no libudev) and new CGEventTap +
   GameController backend deliver keyboard/mouse/gamepad events. The Windows

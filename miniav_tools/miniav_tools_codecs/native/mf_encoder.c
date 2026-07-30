@@ -19,6 +19,7 @@
 #define COBJMACROS
 #include <windows.h>
 #include <codecapi.h>
+#include <strmif.h> /* ICodecAPI (codecapi.h only declares its property GUIDs) */
 #include <mfapi.h>
 #include <mferror.h>
 #include <mfidl.h>
@@ -52,6 +53,28 @@ typedef struct {
 } MfVidEnc;
 
 static int mfenc_started;
+
+/* ICodecAPI + the two encoder-property GUIDs we need, declared locally so we
+ * don't have to link strmiids/INITGUID (which would collide with the MF GUIDs
+ * the CMake build already pulls from mfuuid.lib). Values are the canonical
+ * Windows SDK codecapi.h / strmif.h definitions.
+ *   AVLowLatencyMode  — TRUE disables B-frames + lookahead (live, low delay).
+ *   AVEncMPVDefaultBPictureCount — belt-and-braces 0 B-frames. */
+static const GUID kIID_ICodecAPI = {
+    0x901db4c7,
+    0x31ce,
+    0x41a2,
+    {0x85, 0xdc, 0x8f, 0xa0, 0xbf, 0x41, 0xb8, 0xda}};
+static const GUID kCODECAPI_AVLowLatencyMode = {
+    0x9c27891a,
+    0xed7a,
+    0x40e1,
+    {0x88, 0xe8, 0xb2, 0x27, 0x27, 0xa0, 0x24, 0xee}};
+static const GUID kCODECAPI_AVEncMPVDefaultBPictureCount = {
+    0x8d390aac,
+    0xdc5c,
+    0x4200,
+    {0xb5, 0x7f, 0x81, 0x4d, 0x04, 0xba, 0xba, 0xb2}};
 
 static int mf_up(void) {
   HRESULT co = CoInitializeEx(NULL, COINIT_MULTITHREADED);
@@ -166,6 +189,32 @@ MFENC_API void *miniav_shim_mfenc_create(int codec, int width, int height,
     HRESULT hr = IMFTransform_SetInputType(s->mft, 0, it, 0);
     IMFMediaType_Release(it);
     if (FAILED(hr)) goto fail;
+  }
+
+  /* Low-latency: the MS H.264 encoder defaults to B-frames + a lookahead that
+   * add reorder delay (fine for VOD, wrong for a live preview — this was the
+   * "weird latency delay" on h264; the HEVC MFT defaults to 0 B-frames, so it
+   * didn't show it). Turn on low-latency mode (disables B-frames) and pin the
+   * B-picture count to 0. Best-effort: some encoder MFTs don't expose ICodecAPI
+   * or a given property, so ignore failures. Must run before streaming; done
+   * here (after the types, before the SPS blob) so the extradata reflects it. */
+  {
+    ICodecAPI *api = NULL;
+    if (SUCCEEDED(IMFTransform_QueryInterface(s->mft, &kIID_ICodecAPI,
+                                              (void **)&api)) &&
+        api) {
+      VARIANT v;
+      VariantInit(&v);
+      v.vt = VT_BOOL;
+      v.boolVal = VARIANT_TRUE;
+      ICodecAPI_SetValue(api, &kCODECAPI_AVLowLatencyMode, &v);
+      VariantClear(&v);
+      v.vt = VT_UI4;
+      v.ulVal = 0;
+      ICodecAPI_SetValue(api, &kCODECAPI_AVEncMPVDefaultBPictureCount, &v);
+      VariantClear(&v);
+      ICodecAPI_Release(api);
+    }
   }
 
   /* GOP: left to the encoder default; callers force IDRs via the keyframe flag

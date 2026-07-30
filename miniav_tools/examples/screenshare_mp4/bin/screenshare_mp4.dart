@@ -484,7 +484,12 @@ Future<bool> _d3d11EffectToSharedTex(
   if (video.nativeHandles.isEmpty || video.nativeHandles[0] == null) {
     return false;
   }
-  final int handleAddr = (video.nativeHandles[0] as Pointer).address;
+  // nativeHandles[0] is the shared NT HANDLE value as a plain Dart int
+  // (older builds handed out a Pointer<Void>; accept both).
+  final rawHandle = video.nativeHandles[0];
+  final int handleAddr = rawHandle is int
+      ? rawHandle
+      : (rawHandle as Pointer).address;
   if (handleAddr == 0) return false;
 
   final int stride = video.strideBytes.isNotEmpty
@@ -550,11 +555,15 @@ Future<Uint8List?> _d3d11ToRgba(
   final video = buffer.data;
   if (video is! MiniAVVideoBuffer) return null;
 
-  // nativeHandles[0] is a Pointer<Void> storing the NT HANDLE value.
   if (video.nativeHandles.isEmpty || video.nativeHandles[0] == null) {
     return null;
   }
-  final int handleAddr = (video.nativeHandles[0] as Pointer).address;
+  // nativeHandles[0] is the shared NT HANDLE value as a plain Dart int
+  // (older builds handed out a Pointer<Void>; accept both).
+  final rawHandle = video.nativeHandles[0];
+  final int handleAddr = rawHandle is int
+      ? rawHandle
+      : (rawHandle as Pointer).address;
   if (handleAddr == 0) return null;
 
   final int stride = video.strideBytes.isNotEmpty

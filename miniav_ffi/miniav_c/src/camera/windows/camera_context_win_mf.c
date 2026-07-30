@@ -2056,14 +2056,18 @@ static MiniAVResultCode mf_release_buffer(MiniAVCameraContext *ctx,
           }
         } else if (frame_payload->original_output_preference ==
                    MINIAV_OUTPUT_PREFERENCE_GPU) {
-          // GPU path cleanup
+          // GPU path cleanup.
+          // OWNERSHIP: miniav closes the shared NT handle here. The app must
+          // finish importing it (OpenSharedResource1 / minigpu
+          // mgpuImportVideoFrame) BEFORE calling MiniAV_ReleaseBuffer, and
+          // must NOT close it itself. Leaving the close to the app leaked one
+          // kernel handle per captured GPU frame.
           if (frame_payload->gpu.shared_texture_handle) {
-            // The application is responsible for closing the handle it
-            // received. We just log that we are aware of it.
-            miniav_log(
-                MINIAV_LOG_LEVEL_DEBUG,
-                "MF: App is responsible for closing GPU shared handle %p.",
-                frame_payload->gpu.shared_texture_handle);
+            miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                       "MF: Closing GPU shared handle %p.",
+                       frame_payload->gpu.shared_texture_handle);
+            CloseHandle(frame_payload->gpu.shared_texture_handle);
+            frame_payload->gpu.shared_texture_handle = NULL;
           }
           if (frame_payload->gpu.gpu_texture_ptr) {
             ULONG ref_count =

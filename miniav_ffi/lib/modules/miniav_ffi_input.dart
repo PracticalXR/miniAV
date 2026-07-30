@@ -121,8 +121,13 @@ class MiniAVFFIInputContextPlatform extends MiniInputContextPlatformInterface {
     void Function(MiniAVKeyboardEvent event, Object? userData)? onKeyboard,
     void Function(MiniAVMouseEvent event, Object? userData)? onMouse,
     void Function(MiniAVGamepadEvent event, Object? userData)? onGamepad,
+    void Function(MiniAVMotionEvent event, Object? userData)? onMotion,
     Object? userData,
   }) async {
+    // TODO(input-p0): wire onMotion to MiniAV_Input_SetMotionCallback once the
+    // native MiniAVMotionEvent struct + ffigen bindings land (the C struct +
+    // iOS/Android backends are the parallel P0 work). Accepted + ignored today
+    // so the shared interface signature holds; web fully implements motion.
     _ensureNotDestroyed();
 
     if (_pendingConfig == null) {

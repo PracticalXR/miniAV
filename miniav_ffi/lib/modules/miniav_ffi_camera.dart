@@ -126,6 +126,12 @@ class MiniFFICameraContext implements MiniCameraContextPlatformInterface {
   ffi.NativeCallable<bindings.MiniAVBufferCallbackFunction>? _callbackHandle;
   FFIContextLostRegistry<bindings.MiniAVCameraContextHandle>? _lostRegistry;
   bool _isDestroyed = false;
+
+  /// Set for the window between "native capture has been told to stop" and
+  /// "the NativeCallable is closed". Buffers that arrive in that window are
+  /// released natively instead of being handed to the user callback — see
+  /// [_drainPendingCallbacks].
+  bool _stopping = false;
   late final Finalizer<bindings.MiniAVCameraContextHandle> _finalizer;
 
   MiniFFICameraContext(bindings.MiniAVCameraContextHandle context)
@@ -210,9 +216,10 @@ class MiniFFICameraContext implements MiniCameraContextPlatformInterface {
       ffi.Pointer<bindings.MiniAVBuffer> buffer,
       ffi.Pointer<ffi.Void> cbUserData,
     ) {
-      // Check if context was destroyed during callback.
-      // Still release the buffer to avoid leaking native resources.
-      if (_isDestroyed) {
+      // Check if context was destroyed (or is stopping) during callback.
+      // Still release the buffer to avoid leaking native resources — on the
+      // GPU path the payload owns a D3D11 texture ref AND a shared NT handle.
+      if (_isDestroyed || _stopping) {
         final handle = buffer.ref.internal_handle;
         if (handle != ffi.nullptr) {
           bindings.MiniAV_ReleaseBuffer(handle);
@@ -245,30 +252,55 @@ class MiniFFICameraContext implements MiniCameraContextPlatformInterface {
     }
   }
 
+  /// Lets buffers already posted to the NativeCallable's port — but not yet
+  /// delivered to this isolate — run before the callable is closed.
+  ///
+  /// `NativeCallable.listener.close()` DROPS undelivered messages, and a
+  /// dropped buffer is never passed to `MiniAV_ReleaseBuffer`: on the GPU path
+  /// that leaks a D3D11 texture reference *and* a shared NT handle per dropped
+  /// frame. The native StopCapture has already quiesced the capture thread by
+  /// the time this runs, so no new buffers can be queued; yielding a few
+  /// event-loop turns drains whatever is in flight into the `_stopping`
+  /// fast-release branch of `ffiCallback`.
+  Future<void> _drainPendingCallbacks() async {
+    for (var i = 0; i < 3; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+
   Future<void> _cleanupCallback() async {
     _callbackHandle?.close();
     _callbackHandle = null;
+    _stopping = false;
   }
 
   @override
   Future<void> stopCapture() async {
-    // Don't throw if context is destroyed - just clean up Dart resources
-    if (_isDestroyed || _context == null) {
-      await _cleanupCallback();
+    // Don't throw if already stopped (or never started) - this is idempotent.
+    // Also covers "already destroyed": destroy() nulls _callbackHandle.
+    if (_callbackHandle == null) {
+      _stopping = false;
       return;
     }
 
-    // Don't throw if already stopped - this is idempotent
-    if (_callbackHandle == null) {
-      return; // Already stopped
+    // Route any in-flight buffer straight to MiniAV_ReleaseBuffer from here on.
+    _stopping = true;
+
+    // Stop the native capture thread first so nothing new can be queued. This
+    // also runs on the destroy() path (_isDestroyed is already true but
+    // _context is still live) — previously destroy() skipped it and closed the
+    // callable immediately, dropping (and leaking) any in-flight buffer.
+    bindings.MiniAVResultCode? result;
+    if (_context != null) {
+      result = bindings.MiniAV_Camera_StopCapture(_context!);
     }
 
-    final result = bindings.MiniAV_Camera_StopCapture(_context!);
-
+    await _drainPendingCallbacks();
     await _cleanupCallback();
 
     // Only warn on unexpected errors, not "already stopped" errors
-    if (result != bindings.MiniAVResultCode.MINIAV_SUCCESS &&
+    if (result != null &&
+        result != bindings.MiniAVResultCode.MINIAV_SUCCESS &&
         result != bindings.MiniAVResultCode.MINIAV_ERROR_NOT_RUNNING) {
       print('Warning: MiniAV_Camera_StopCapture failed: ${result.name}');
     }

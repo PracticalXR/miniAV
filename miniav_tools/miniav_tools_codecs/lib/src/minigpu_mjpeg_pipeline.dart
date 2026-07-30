@@ -86,7 +86,11 @@ class MinigpuMjpegPipeline extends GpuCodecPipeline {
     //   input  shape [H, W, 4]  (RGBA, float)   → length = H*W*4
     //   output shape [H, W, 3]  (Y,Cb,Cr float) → length = H*W*3
     //
-    // We dispatch one thread per pixel (index = global_invocation_id.x).
+    // We dispatch one thread per pixel. executeShader folds the workgroup count
+    // into a 2D (x,y) grid when it exceeds WebGPU's 65535/dim cap (large frames
+    // like 5120x1440), so the flat pixel index must include the Y row:
+    //   pixel = gid.x + gid.y * (num_workgroups.x * 64).
+    // For frames that fit a 1D dispatch, gid.y==0 and this equals gid.x.
     // The auto-generated bindings provide:
     //   @group(0) @binding(0) input_0:  array<f32>
     //   @group(0) @binding(1) output_0: array<f32>
@@ -96,8 +100,9 @@ class MinigpuMjpegPipeline extends GpuCodecPipeline {
 @group(0) @binding(1) var<storage, read_write> output_0: array<f32>;
 
 @compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let pixel = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+  let pixel = gid.x + gid.y * (nwg.x * 64u);
   let total: u32 = ${config.width * config.height}u;
   if (pixel >= total) { return; }
 
@@ -174,12 +179,18 @@ var<workgroup> tmp:  array<f32, 64>;
 
 @compute @workgroup_size(64)
 fn main(
-  @builtin(global_invocation_id) g_id: vec3<u32>,
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
-  // Workgroup index = global / 64
-  let group_idx: u32 = g_id.x / 64u;
-  // gid.x in [0, numBlocks*3). channel = group_idx % 3, block = group_idx / 3.
+  // One workgroup per (block,channel). executeShader folds the group count into
+  // a 2D grid above 65535 groups (large frames), so reconstruct the flat group
+  // index from the 2D workgroup id. The guard drops the padding groups the 2D
+  // round-up adds; wid is uniform across the workgroup so this early return is
+  // barrier-safe (all 64 threads take it or none do).
+  let group_idx: u32 = wid.x + wid.y * nwg.x;
+  if (group_idx >= ${numBlocks * 3}u) { return; }
+  // channel = group_idx % 3, block = group_idx / 3.
   let chan: u32   = group_idx % 3u;
   let block: u32  = group_idx / 3u;
   let bx:    u32  = block % ${bx}u;
@@ -276,10 +287,14 @@ const ZIG: array<u32, 64> = array<u32, 64>(${_arr(zigzag)}u);
 
 @compute @workgroup_size(64)
 fn main(
-  @builtin(global_invocation_id) g_id: vec3<u32>,
+  @builtin(workgroup_id) wid: vec3<u32>,
+  @builtin(num_workgroups) nwg: vec3<u32>,
   @builtin(local_invocation_id) lid: vec3<u32>,
 ) {
-  let group_idx: u32 = g_id.x / 64u;
+  // One workgroup per (block,channel); flat index from the 2D grid executeShader
+  // uses above 65535 groups (large frames), bounded against the 2D round-up pad.
+  let group_idx: u32 = wid.x + wid.y * nwg.x;
+  if (group_idx >= ${numBlocks * 3}u) { return; }
   let chan: u32  = group_idx % 3u;
   let block: u32 = group_idx / 3u;
   let li: u32    = lid.x;
@@ -586,8 +601,12 @@ fn encode_block(qz_base: u32, is_chroma: bool) {
 }
 
 @compute @workgroup_size(1)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let mcu: u32 = gid.x;
+fn main(@builtin(global_invocation_id) gid: vec3<u32>,
+        @builtin(num_workgroups) nwg: vec3<u32>) {
+  // MCU count can exceed WebGPU's 65535/dim dispatch cap on large frames
+  // (5120x1440 -> 115200 MCUs), so process() folds the dispatch into a 2D grid;
+  // reconstruct the flat MCU index. For small frames gid.y==0 -> mcu==gid.x.
+  let mcu: u32 = gid.x + gid.y * nwg.x;
   if (mcu >= NUM_MCUS) { return; }
 
   // Each MCU = 1 Y block, 1 Cb block, 1 Cr block.
@@ -643,7 +662,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     final shader = _shader!;
     shader.setBuffer('input_0', qz.buffer);
     shader.setBuffer('output_0', out.buffer);
-    await shader.dispatch(numMcus, 1, 1);
+    // Fold the per-MCU dispatch into a 2D grid so it never exceeds WebGPU's
+    // 65535-per-dimension cap (5120x1440 -> 115200 MCUs). The shader
+    // reconstructs the flat MCU index from (gid.x, gid.y). <=65535 -> gy==1.
+    final gx = numMcus <= 65535 ? numMcus : 65535;
+    final gy = (numMcus + gx - 1) ~/ gx;
+    await shader.dispatch(gx == 0 ? 1 : gx, gy == 0 ? 1 : gy, 1);
     return {'huff_raw': out};
   }
 }

@@ -499,13 +499,19 @@ await context.startCapture((buffer, userData) {
 
 ### GPU Integration
 
-Buffers can contain GPU handles for zero-copy workflows:
+Buffers can contain GPU handles for zero-copy workflows. **`buffer.contentType`
+is the discriminator** — never test `planes[0] != null`, because on the GPU path
+`planes[0]` is a non-null but *empty* `Uint8List` (stride 0), so that test takes
+the CPU branch.
 
 ```dart
 if (buffer.contentType == MiniAVBufferContentType.gpuD3D11Handle) {
-  // Direct GPU texture handle (Windows)
-  final gpuHandle = videoData.planes[0];
-  // Pass to minigpu or other GPU library
+  // Windows zero-copy: the shared NT HANDLE lives in nativeHandles[0]
+  // (a plain Dart int -- NOT a Pointer, NOT planes[0]).
+  final int gpuHandle = videoData.nativeHandles[0]!;
+  // Import it BEFORE releasing the buffer; miniav closes the handle in
+  // MiniAV.releaseBuffer -- do not close it yourself, and release every
+  // buffer you receive (including ones you skip).
 }
 ```
 

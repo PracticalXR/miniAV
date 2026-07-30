@@ -105,6 +105,25 @@ typedef struct MfDecSession {
 /* small helpers                                                              */
 /* -------------------------------------------------------------------------- */
 
+/* Env-gated stderr trace (MFDEC_DEBUG=1) — the playbook's MFAAC_DEBUG pattern.
+ * Used to localise native faults (e.g. inside vendor MFT activation) that a
+ * debugger can't easily reach through the Dart FFI boundary. */
+static int mfdec_dbg(void) {
+  static int v = -1;
+  if (v < 0) {
+    const char *e = getenv("MFDEC_DEBUG");
+    v = (e && *e == '1') ? 1 : 0;
+  }
+  return v;
+}
+#define MFDEC_TRACE(...)                                                       \
+  do {                                                                         \
+    if (mfdec_dbg()) {                                                         \
+      fprintf(stderr, __VA_ARGS__);                                            \
+      fflush(stderr);                                                          \
+    }                                                                          \
+  } while (0)
+
 static const GUID *mfdec_input_subtype(int codec) {
   return (codec == MFDEC_CODEC_HEVC) ? &MFVideoFormat_HEVC : &MFVideoFormat_H264;
 }
@@ -209,11 +228,16 @@ static IMFTransform *mfdec_enum_activate(int codec, int hardware_only) {
     if (activates) CoTaskMemFree(activates);
     return NULL;
   }
+  MFDEC_TRACE("[mfdec] enum codec=%d hw_only=%d -> %u MFTs\n", codec,
+              hardware_only, (unsigned)count);
   IMFTransform *mft = NULL;
   for (UINT32 i = 0; i < count; i++) {
     if (!mft) {
+      MFDEC_TRACE("[mfdec] activating MFT %u...\n", (unsigned)i);
       HRESULT ahr = IMFActivate_ActivateObject(activates[i], &IID_IMFTransform,
                                                (void **)&mft);
+      MFDEC_TRACE("[mfdec] activate %u hr=0x%08lX\n", (unsigned)i,
+                  (unsigned long)ahr);
       if (FAILED(ahr)) mft = NULL;
     }
     IMFActivate_Release(activates[i]);
@@ -229,6 +253,15 @@ static int mfdec_configure_input(MfDecSession *s) {
   IMFMediaType_SetGUID(in_type, &MF_MT_SUBTYPE, mfdec_input_subtype(s->codec));
   IMFMediaType_SetUINT32(in_type, &MF_MT_INTERLACE_MODE,
                          MFVideoInterlace_MixedInterlaceOrProgressive);
+  /* Coded-dims hint from the caller. The H.264 decoder MFT doesn't need it,
+   * but the HEVC decoder MFT REQUIRES a frame size on the input type: without
+   * it, it can't propose an output type and then rejects every ProcessInput
+   * with MF_E_TRANSFORM_TYPE_NOT_SET (it never gets to parse the SPS). */
+  if (s->width > 0 && s->height > 0) {
+    IMFMediaType_SetUINT64(in_type, &MF_MT_FRAME_SIZE,
+                           (((UINT64)(UINT32)s->width) << 32) |
+                               (UINT32)s->height);
+  }
   HRESULT hr = IMFTransform_SetInputType(s->mft, 0, in_type, 0);
   IMFMediaType_Release(in_type);
   if (FAILED(hr)) {
@@ -382,6 +415,24 @@ static void mfdec_feed_one(MfDecSession *s) {
   }
 }
 
+/* Send the streaming notifications once. For sync MFTs whose output type
+ * could not be set at create (the decoder must parse an SPS first — HEVC),
+ * this is DEFERRED until the lazy output negotiation succeeds: the Microsoft
+ * HEVC decoder MFT (HEVC Video Extensions) hard-crashes (access violation)
+ * inside ProcessMessage(NOTIFY_BEGIN_STREAMING) when its output type is
+ * still unset, while the H.264 decoder tolerates it. Sync MFTs must not
+ * require these notifications before ProcessInput (MF contract), so the
+ * deferral is safe; async HW MFTs get them at create as before (their event
+ * pump depends on it, and they renegotiate output via STREAM_CHANGE by
+ * design). */
+static void mfdec_notify_streaming(MfDecSession *s) {
+  if (s->streaming) return;
+  IMFTransform_ProcessMessage(s->mft, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+  IMFTransform_ProcessMessage(s->mft, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+  s->streaming = 1;
+  MFDEC_TRACE("[mfdec] streaming notifications sent\n");
+}
+
 /* Drain one output sample in response to a HaveOutput event. The output type
  * is negotiated lazily on the first MF_E_TRANSFORM_STREAM_CHANGE (the decoder
  * signals it once it has parsed the SPS), not pre-set. Handles the
@@ -397,7 +448,9 @@ static void mfdec_drain_one(MfDecSession *s) {
     if (odb.pSample) IMFSample_Release(odb.pSample);
     if (odb.pEvents) IMFCollection_Release(odb.pEvents);
     s->output_configured = 0;
-    mfdec_configure_output(s);
+    int cfg = mfdec_configure_output(s);
+    MFDEC_TRACE("[mfdec] drain: STREAM_CHANGE, configure_output=%d\n", cfg);
+    if (cfg == 0) mfdec_notify_streaming(s);
     return;
   }
   if (hr == MF_E_TRANSFORM_NEED_MORE_INPUT) {
@@ -405,6 +458,8 @@ static void mfdec_drain_one(MfDecSession *s) {
     return;
   }
   if (FAILED(hr) || !odb.pSample) {
+    MFDEC_TRACE("[mfdec] drain: ProcessOutput hr=0x%08lX sample=%p\n",
+                (unsigned long)hr, (void *)odb.pSample);
     if (odb.pSample) IMFSample_Release(odb.pSample);
     if (odb.pEvents) IMFCollection_Release(odb.pEvents);
     return;
@@ -456,7 +511,8 @@ MIO_API int miniav_shim_mfdec_has_hardware(int codec) {
 
 MIO_API void *miniav_shim_mfdec_create(void *d3d11_device, int codec,
                                        const uint8_t *extradata,
-                                       int extradata_size) {
+                                       int extradata_size, int width,
+                                       int height) {
   (void)extradata;
   (void)extradata_size; /* M1: rely on in-band SPS/PPS (Annex-B) */
 
@@ -471,9 +527,15 @@ MIO_API void *miniav_shim_mfdec_create(void *d3d11_device, int codec,
     return NULL;
   }
 
+  MFDEC_TRACE("[mfdec] create codec=%d %dx%d: startup ok\n", codec, width,
+              height);
   MfDecSession *s = (MfDecSession *)calloc(1, sizeof(MfDecSession));
   if (!s) { MFShutdown(); return NULL; }
   s->codec = codec;
+  /* Coded-dims hint (0 = unknown); overwritten by the negotiated output type
+   * once the decoder has parsed the bitstream. */
+  s->width = width;
+  s->height = height;
 
   if (d3d11_device) {
     s->device = (ID3D11Device *)d3d11_device;
@@ -491,12 +553,14 @@ MIO_API void *miniav_shim_mfdec_create(void *d3d11_device, int codec,
     s->owns_device = 1;
   }
   if (!s->device) goto fail;
+  MFDEC_TRACE("[mfdec] create: device ok\n");
 
   if (FAILED(MFCreateDXGIDeviceManager(&s->reset_token, &s->dxgi_mgr)))
     goto fail;
   if (FAILED(IMFDXGIDeviceManager_ResetDevice(
           s->dxgi_mgr, (IUnknown *)s->device, s->reset_token)))
     goto fail;
+  MFDEC_TRACE("[mfdec] create: dxgi manager ok\n");
 
   /* Prefer a vendor hardware (async) decoder MFT; fall back to the Microsoft
    * decoder MFT (sync), which does DXVA2 GPU decode → D3D11 NV12 once the D3D
@@ -524,10 +588,14 @@ MIO_API void *miniav_shim_mfdec_create(void *d3d11_device, int codec,
   }
 
   /* Bind D3D BEFORE setting media types so the MFT allocates a D3D pool. */
+  MFDEC_TRACE("[mfdec] create: mft ok (async=%d), binding d3d manager...\n",
+              s->is_async);
   IMFTransform_ProcessMessage(s->mft, MFT_MESSAGE_SET_D3D_MANAGER,
                               (ULONG_PTR)s->dxgi_mgr);
+  MFDEC_TRACE("[mfdec] create: d3d manager bound, setting input type...\n");
 
   if (mfdec_configure_input(s) != 0) goto fail;
+  MFDEC_TRACE("[mfdec] create: input type ok\n");
 
   if (s->is_async) {
     if (FAILED(IMFTransform_QueryInterface(
@@ -540,9 +608,17 @@ MIO_API void *miniav_shim_mfdec_create(void *d3d11_device, int codec,
    * here is fine. */
   mfdec_configure_output(s);
 
-  IMFTransform_ProcessMessage(s->mft, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
-  IMFTransform_ProcessMessage(s->mft, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
-  s->streaming = 1;
+  MFDEC_TRACE("[mfdec] create: output type %s\n",
+              s->output_configured ? "ok" : "deferred");
+  /* See mfdec_notify_streaming: a sync MFT with a still-unset output type
+   * (HEVC before its SPS) must not receive the streaming notifications yet —
+   * they are sent when the lazy output negotiation completes. */
+  if (s->is_async || s->output_configured) {
+    mfdec_notify_streaming(s);
+  } else {
+    MFDEC_TRACE("[mfdec] create: streaming notifications deferred\n");
+  }
+  MFDEC_TRACE("[mfdec] create: session ready\n");
   return s;
 
 fail:
@@ -598,6 +674,10 @@ MIO_API int miniav_shim_mfdec_send(void *session, const uint8_t *data, int size,
       mfdec_drain_one(s);
     }
     IMFSample_Release(sample);
+    if (hr != S_OK) {
+      MFDEC_TRACE("[mfdec] send: ProcessInput hr=0x%08lX\n",
+                  (unsigned long)hr);
+    }
     if (FAILED(hr) && hr != MF_E_NOTACCEPTING) return -1;
   }
   return 0;
@@ -750,7 +830,7 @@ MIO_API int miniav_shim_mfdec_drain(void *session) {
       if (hr == MF_E_TRANSFORM_STREAM_CHANGE) {
         if (odb.pSample) IMFSample_Release(odb.pSample);
         s->output_configured = 0;
-        mfdec_configure_output(s);
+        if (mfdec_configure_output(s) == 0) mfdec_notify_streaming(s);
         continue;
       }
       if (FAILED(hr) || !odb.pSample) {

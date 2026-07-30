@@ -183,5 +183,96 @@ void main() {
       },
       timeout: const Timeout(Duration(seconds: 60)),
     );
+
+    test(
+      'high-res 5120x1440 frame encodes without exceeding the 65535 '
+      'workgroup-per-dimension dispatch cap',
+      () async {
+        // Regression: at 5120x1440 the GPU pipeline's per-pixel / per-(block,
+        // channel) / per-MCU dispatches overflow WebGPU's 65535/dim cap
+        //   color+DCT+quant groups = W*H*3/64 = 345600
+        //   Huffman groups         = numMcus = (W/8)*(H/8) = 115200
+        // which invalidated the CommandBuffer and produced no output. The
+        // pipeline now folds each dispatch into a 2D grid. This asserts the
+        // encode completes and yields a JFIF that decodes to the right dims.
+        const w = 5120;
+        const h = 1440;
+        final cfg = EncoderConfig(
+          codec: VideoCodec.mjpeg,
+          width: w,
+          height: h,
+          bitrateBps: 0,
+          frameRateNumerator: 30,
+          frameRateDenominator: 1,
+          inputPixelFormat: MiniAVPixelFormat.rgba32,
+          crfQuality: 5,
+        );
+
+        final encoder = await MinigpuBackend().createEncoder(cfg);
+        expect(encoder, isNotNull);
+
+        // A smooth gradient (forgiving for DCT); we only need a valid decode.
+        final src = Uint8List(w * h * 4);
+        for (var y = 0; y < h; y++) {
+          final row = y * w * 4;
+          for (var x = 0; x < w; x++) {
+            final i = row + x * 4;
+            src[i + 0] = x & 0xff;
+            src[i + 1] = y & 0xff;
+            src[i + 2] = (x + y) & 0xff;
+            src[i + 3] = 0xff;
+          }
+        }
+
+        try {
+          final pkt = await encoder!.encode(
+            CpuFrameSource(
+              bytes: src,
+              pixelFormat: MiniAVPixelFormat.rgba32,
+              width: w,
+              height: h,
+              timestampUs: 0,
+            ),
+          );
+          expect(pkt, isNotNull, reason: 'high-res frame produced no packet');
+          final jfif = pkt!.data;
+          expect(jfif.length, greaterThan(2000));
+
+          final decoded = img.decodeJpg(jfif);
+          expect(
+            decoded,
+            isNotNull,
+            reason: 'GPU JFIF for 5120x1440 failed to decode — dispatch '
+                'overflow likely corrupted the stream',
+          );
+          expect(decoded!.width, w);
+          expect(decoded.height, h);
+
+          // Sparse MAE (a prime stride keeps the check fast on 7.4M pixels):
+          // proves the folded 2D dispatch still covers the whole frame, not
+          // just the first 65535*64 elements.
+          var totalErr = 0, count = 0;
+          for (var p = 0; p < w * h; p += 9973) {
+            final x = p % w, y = p ~/ w;
+            final i = p * 4;
+            final px = decoded.getPixel(x, y);
+            totalErr += (px.r.toInt() - src[i + 0]).abs();
+            totalErr += (px.g.toInt() - src[i + 1]).abs();
+            totalErr += (px.b.toInt() - src[i + 2]).abs();
+            count += 3;
+          }
+          final mae = totalErr / count;
+          expect(
+            mae,
+            lessThan(6.0),
+            reason: 'high-res decode MAE $mae too high — folded dispatch may '
+                'be dropping rows/blocks beyond the 65535 boundary',
+          );
+        } finally {
+          await encoder?.close();
+        }
+      },
+      timeout: const Timeout(Duration(seconds: 120)),
+    );
   });
 }

@@ -23,10 +23,10 @@ dev_dependencies:
   image: ^4.5.0
   benchmark_harness: ^2.3.1
   # Native-assets build-hook deps (build `native/` → miniav_tools_codecs_native).
-  code_assets: ^1.0.0
-  hooks: ^1.0.0
+  code_assets: ^1.2.1
+  hooks: ^2.0.2
   logging: ^1.2.0
-  native_toolchain_cmake: ^0.2.4
+  native_toolchain_cmake: ^0.2.7
   # Test-only: FFmpeg encoder to produce H.264 test packets for the MF decode
   # tests (no cycle — miniav_tools_ffmpeg does not depend on codecs).
   miniav_tools_ffmpeg: ^0.5.2

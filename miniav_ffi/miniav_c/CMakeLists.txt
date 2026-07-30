@@ -77,12 +77,28 @@ else()
     message(STATUS "Loopback audio disabled: not supported on ${MINIAV_PLATFORM_NAME}")
 endif()
 
-# Input capture is only supported on desktop platforms
+# Input capture (keyboard/mouse/gamepad) is only supported on desktop platforms
 if(MINIAV_PLATFORM_WINDOWS OR MINIAV_PLATFORM_MACOS OR MINIAV_PLATFORM_LINUX)
     option(MINIAV_ENABLE_INPUT "Enable Input Capture Module" ON)
 else()
     set(MINIAV_ENABLE_INPUT OFF CACHE BOOL "Input capture not supported on mobile/web platforms" FORCE)
     message(STATUS "Input capture disabled: not supported on ${MINIAV_PLATFORM_NAME}")
+endif()
+
+# Motion / IMU capture. UNLIKE keyboard/mouse/gamepad, this is FIRST-CLASS on
+# mobile (the primary target: phone tilt → parallax) and a benign no-op surface
+# on desktop (no built-in IMU → the pull API returns NOT_RUNNING). Enabled on
+# iOS/Android + desktop; OFF on web (the browser DeviceMotion path lives in the
+# Dart `miniav_web` package, not this native lib). On desktop the motion API
+# rides the input module (input_api.c is already compiled under
+# MINIAV_ENABLE_INPUT); on mobile it is compiled standalone (see the motion
+# sources block below), which is what un-gates input on mobile for motion only.
+if(MINIAV_PLATFORM_WINDOWS OR MINIAV_PLATFORM_MACOS OR MINIAV_PLATFORM_LINUX OR
+   MINIAV_PLATFORM_IOS OR MINIAV_PLATFORM_ANDROID)
+    option(MINIAV_ENABLE_MOTION "Enable Motion/IMU Capture Module" ON)
+else()
+    set(MINIAV_ENABLE_MOTION OFF CACHE BOOL "Motion handled by miniav_web on web" FORCE)
+    message(STATUS "Native motion disabled: handled by miniav_web on ${MINIAV_PLATFORM_NAME}")
 endif()
 
 # Input injection (event replay) is only supported on desktop platforms
@@ -520,6 +536,13 @@ if(MINIAV_ENABLE_INPUT)
     list(APPEND ALL_DEFINITIONS "MINIAV_MODULE_INPUT_ENABLED")
     list(APPEND ALL_SOURCES "src/input/input_api.c")
     list(APPEND ALL_PRIVATE_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src/input")
+    if(MINIAV_ENABLE_MOTION)
+        # Desktop motion rides the input module: input_api.c (already listed
+        # above) carries MiniAV_Input_GetLatestMotion + miniav_input_deliver_motion.
+        # Desktop backends have no IMU, so they never call the deliver helper and
+        # the pull API returns NOT_RUNNING — the symbols exist and link cleanly.
+        list(APPEND ALL_DEFINITIONS "MINIAV_MODULE_MOTION_ENABLED")
+    endif()
 
     if(MINIAV_PLATFORM_WINDOWS AND MINIAV_BACKEND_WIN_HOOKS_XINPUT)
         message(STATUS "Windows: Enabling low-level hooks + XInput for input capture")
@@ -542,6 +565,52 @@ if(MINIAV_ENABLE_INPUT)
     endif()
 else()
     message(STATUS "Input capture module disabled")
+
+    # --- Motion / IMU Module (Mobile) ---
+    # On mobile, keyboard/mouse/gamepad capture is off but MOTION is first-class.
+    # It reuses the same input context/API layer (input_api.c) with a mobile IMU
+    # backend that calls miniav_input_deliver_motion() per sample. The backend
+    # source + the input_context.h / input_api.c backend-table branch for this
+    # platform are delivered alongside the native backend (see
+    # INPUT_LAYER_PLAN.md §5); this block is the CMake seam they extend:
+    #
+    #   iOS      : src/input/ios/motion_context_ios_coremotion.m
+    #              frameworks: CoreMotion, Foundation
+    #   Android  : src/input/android/motion_context_android_sensor.c (+ JNI)
+    #              link: android, log
+    #
+    # Uncommented by those PRs; until then mobile motion is a no-op surface.
+    if(MINIAV_ENABLE_MOTION AND (MINIAV_PLATFORM_IOS OR MINIAV_PLATFORM_ANDROID))
+        list(APPEND ALL_DEFINITIONS "MINIAV_MODULE_MOTION_ENABLED")
+        list(APPEND ALL_SOURCES "src/input/input_api.c")
+        list(APPEND ALL_HEADERS "src/input/input_context.h")
+        list(APPEND ALL_PRIVATE_INCLUDE_DIRS "${CMAKE_CURRENT_SOURCE_DIR}/src/input")
+
+        if(MINIAV_PLATFORM_IOS)
+            message(STATUS "iOS: Enabling CoreMotion for motion/IMU capture")
+            list(APPEND ALL_SOURCES "src/input/ios/motion_context_ios_coremotion.m")
+            list(APPEND ALL_HEADERS "src/input/ios/motion_context_ios_coremotion.h")
+            # Foundation + UIKit are also in the iOS base link set; repeating a
+            # -framework flag is harmless. CoreMotion is the new dependency.
+            list(APPEND ALL_LINK_LIBS
+                "-framework CoreMotion"
+                "-framework Foundation"
+                "-framework UIKit")
+            list(APPEND ALL_DEFINITIONS "MINIAV_BACKEND_IOS_COREMOTION_ENABLED")
+        else()
+            message(STATUS "Android: Enabling ASensorManager (NDK) for motion/IMU capture")
+            list(APPEND ALL_SOURCES "src/input/android/motion_context_android_sensor.c")
+            list(APPEND ALL_HEADERS "src/input/android/motion_context_android_sensor.h")
+            # ASensorManager + ALooper live in libandroid; libandroid + liblog are
+            # already in the Android base link set (see the platform base setup).
+            # libm is the only addition (quaternion sin/cos/sqrt for the screen
+            # remap). The backend uses NO JNI on the hot path (display rotation is
+            # pushed in from the Flutter host via MiniAV_Input_SetAndroidDisplayRotation
+            # — see MOTION_ANDROID_NOTES.md).
+            list(APPEND ALL_LINK_LIBS m)
+            list(APPEND ALL_DEFINITIONS "MINIAV_BACKEND_ANDROID_SENSOR_MOTION_ENABLED")
+        endif()
+    endif()
 endif()
 
 # --- Input Injection Module (Desktop Only) ---

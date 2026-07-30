@@ -1,6 +1,6 @@
 name: miniav_flutter
 description: Flutter companion for miniav. Re-exports the full miniav API and auto-registers a WidgetsBindingObserver that calls MiniAV.dispose() on hot restart, preventing "Callback invoked after it has been deleted" crashes.
-version: 0.6.0
+version: 0.7.0
 repository: https://github.com/PracticalXR/miniAV/tree/master/miniav_flutter
 
 environment:
@@ -10,7 +10,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  miniav: 0.6.0
+  miniav: 0.7.0
 
 dev_dependencies:
   flutter_test:

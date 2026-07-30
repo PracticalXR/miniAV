@@ -223,13 +223,39 @@ MiniAVResultCode MiniAV_AudioOutput_Configure(
     return MINIAV_ERROR_INVALID_ARG;
   MINIAV_UNUSED(format); // ring is always f32; writes are float PCM.
 
-  // Device selection by id is not yet wired (the engine owns its device); a
-  // non-default request falls back to the system default output.
+  // Resolve the requested device_id — which miniav exposes as the device *name*
+  // (see fill_device_info) — to a concrete ma_device_id so the engine opens the
+  // chosen playback device instead of always falling back to the system default.
+  // Kept on the stack: ma_engine_init copies the id into its device during the
+  // synchronous init call below, so this need only outlive that call.
+  ma_device_id playback_id;
+  ma_bool32 have_playback_id = MA_FALSE;
   if (device_id && device_id[0] != '\0') {
-    miniav_log(MINIAV_LOG_LEVEL_DEBUG,
-               "AudioOutput: device_id '%s' requested — using default output "
-               "(explicit device selection not yet supported).",
-               device_id);
+    ma_context tmp_ctx;
+    if (ma_context_init(NULL, 0, NULL, &tmp_ctx) == MA_SUCCESS) {
+      ma_device_info *playback_infos = NULL;
+      ma_uint32 playback_count = 0;
+      if (ma_context_get_devices(&tmp_ctx, &playback_infos, &playback_count, NULL,
+                                 NULL) == MA_SUCCESS) {
+        for (ma_uint32 i = 0; i < playback_count; ++i) {
+          if (strcmp(playback_infos[i].name, device_id) == 0) {
+            playback_id = playback_infos[i].id;
+            have_playback_id = MA_TRUE;
+            break;
+          }
+        }
+      }
+      ma_context_uninit(&tmp_ctx);
+    }
+    if (have_playback_id) {
+      miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                 "AudioOutput: selected playback device '%s'.", device_id);
+    } else {
+      miniav_log(MINIAV_LOG_LEVEL_WARN,
+                 "AudioOutput: playback device '%s' not found — using system "
+                 "default.",
+                 device_id);
+    }
   }
 
   // Re-configuring rebuilds the whole stream.
@@ -248,6 +274,9 @@ MiniAVResultCode MiniAV_AudioOutput_Configure(
   // layout. The sound below resamples/upmixes the source stream to it, which
   // also lets stereo pan work for mono sources.
   ma_engine_config engineConfig = ma_engine_config_init();
+  if (have_playback_id) {
+    engineConfig.pPlaybackDeviceID = &playback_id;
+  }
   ma_result r = ma_engine_init(&engineConfig, &ctx->engine);
   if (r != MA_SUCCESS) {
     miniav_log(MINIAV_LOG_LEVEL_ERROR, "AudioOutput: ma_engine_init failed: %s",

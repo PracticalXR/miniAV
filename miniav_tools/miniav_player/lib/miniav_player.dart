@@ -50,6 +50,13 @@ export 'src/mse/mse_support_stub.dart'
         blobMimeForBytes,
         mp4MimeForTracks;
 export 'src/mse/mse_view.dart' show MseVideoView;
-export 'src/video_presenter.dart' show VideoFramePresenter, PresenterTimings;
+export 'src/video_presenter.dart'
+    show VideoFramePresenter, PresenterTimings, makeSharedTexturePreviewSource;
 export 'src/video_scheduler.dart' show VideoScheduler, ScheduledVideoFrame;
 export 'src/yuv_rgba_reference.dart' show yuv420pToRgba8;
+// Web VideoFrame → PreviewSource helper (web-only; a native stub throws).
+// Exported so any consumer presenting a WebCodecs `VideoFrame` zero-readback
+// (e.g. livetensor meet) reuses it instead of re-registering frames itself.
+export 'src/web_present_stub.dart'
+    if (dart.library.js_interop) 'src/web_present.dart'
+    show makeWebVideoFramePreviewSource;

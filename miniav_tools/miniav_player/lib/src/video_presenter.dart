@@ -47,6 +47,41 @@ class PresenterTimings {
   double presentMs = 0;
 }
 
+/// A borrowed EXTERNAL D3D11 shared RGBA texture (owned by a codec, not by the
+/// presenter) as a minigpu_view present source. `texPtr` is the
+/// `ID3D11Texture2D*`; `sharedHandle` the legacy DXGI shared HANDLE ANGLE
+/// opens. Build it via [makeSharedTexturePreviewSource].
+class _ExternalSharedTextureSource extends PreviewSource {
+  const _ExternalSharedTextureSource(
+      this.sharedHandle, this.texPtr, this.w, this.h);
+  final int sharedHandle, texPtr, w, h;
+
+  @override
+  PreviewSourceKind get kind => PreviewSourceKind.nativeSharedTexture;
+
+  @override
+  ui.Size get size => ui.Size(w.toDouble(), h.toDouble());
+
+  @override
+  Map<String, Object?> toChannelMessage() => {
+        'handle': texPtr,
+        'sharedHandle': sharedHandle,
+        'width': w,
+        'height': h,
+        'pixelFormat': 'rgba8',
+      };
+}
+
+/// A minigpu_view [PreviewSource] for an EXTERNAL, already-RGBA D3D11 shared
+/// texture — one a codec composes RGBA into and hands out as (legacy DXGI)
+/// [sharedHandle] + `ID3D11Texture2D*` [texPtr]. Present it straight through a
+/// [MinigpuPreviewController.present] (no minigpu compute / no presenter
+/// needed). Centralises the nativeSharedTexture wiring consumers used to
+/// hand-roll (livetensor gsplats, gui_bench).
+PreviewSource makeSharedTexturePreviewSource(
+        int sharedHandle, int texPtr, int width, int height) =>
+    _ExternalSharedTextureSource(sharedHandle, texPtr, width, height);
+
 class VideoFramePresenter {
   VideoFramePresenter(Minigpu gpu, this._controller)
     : _gpu = gpu,
@@ -257,6 +292,22 @@ class VideoFramePresenter {
   Future<void> presentD3D11Nv12(int sharedHandle, int w, int h) {
     if (_disposed) return Future<void>.value();
     final f = _presentD3d11(sharedHandle, w, h);
+    _inFlight = f;
+    return f.whenComplete(() {
+      if (identical(_inFlight, f)) _inFlight = null;
+    });
+  }
+
+  /// Present an EXTERNAL, already-RGBA D3D11 shared texture — a codec that
+  /// composes RGBA directly into its own shared texture (e.g. livetensor's
+  /// gsplats GPU decoder) and hands out the (legacy DXGI) [sharedHandle] +
+  /// `ID3D11Texture2D*` [texPtr]. No import/convert/copy: the handle is handed
+  /// straight to the preview controller. Centralises the nativeSharedTexture
+  /// PreviewSource so consumers don't hand-roll it.
+  Future<void> presentD3D11Rgba(int sharedHandle, int texPtr, int w, int h) {
+    if (_disposed) return Future<void>.value();
+    final f = _controller
+        .present(_ExternalSharedTextureSource(sharedHandle, texPtr, w, h));
     _inFlight = f;
     return f.whenComplete(() {
       if (identical(_inFlight, f)) _inFlight = null;

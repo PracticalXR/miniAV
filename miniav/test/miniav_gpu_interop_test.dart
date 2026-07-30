@@ -195,6 +195,42 @@ void main() {
       expect(buf.nativeHandles, hasLength(1));
       expect(buf.nativeHandles[0], same(fakeHandle));
     });
+
+    // Regression: the README used to tell integrators the GPU handle lives in
+    // `planes[0]`. It does not — it is in `nativeHandles[0]`, and `planes[0]`
+    // as produced by the FFI shim is a non-null but EMPTY Uint8List (stride 0),
+    // so `planes[0] != null` silently takes the CPU branch. `contentType` is
+    // the discriminator.
+    test('GPU-path layout: contentType discriminates, not planes[0]', () {
+      // Exactly what MiniAVBufferFFI.fromPointer produces on the gpuD3D11Handle
+      // path: stride 0 => zero-length typed-data view, handle as an int.
+      const handleValue = 0x1234;
+      final videoBuf = MiniAVVideoBuffer(
+        width: 1920,
+        height: 1080,
+        pixelFormat: MiniAVPixelFormat.bgra32,
+        strideBytes: [0, 0, 0, 0],
+        planes: [Uint8List(0), null, null, null],
+        nativeHandles: [handleValue, null, null, null],
+      );
+      final buf = MiniAVBuffer(
+        type: MiniAVBufferType.video,
+        contentType: MiniAVBufferContentType.gpuD3D11Handle,
+        timestampUs: 1,
+        data: videoBuf,
+        dataSizeBytes: 1920 * 1080 * 4,
+      );
+
+      // The correct branch.
+      expect(buf.contentType, equals(MiniAVBufferContentType.gpuD3D11Handle));
+      expect(videoBuf.nativeHandles[0], isA<int>());
+      expect(videoBuf.nativeHandles[0], equals(handleValue));
+
+      // The trap: non-null but useless as pixel data / as a discriminator.
+      expect(videoBuf.planes[0], isNotNull);
+      expect(videoBuf.planes[0], isEmpty);
+      expect(videoBuf.strideBytes[0], equals(0));
+    });
   });
 
   // ---------------------------------------------------------------------------

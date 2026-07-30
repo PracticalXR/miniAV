@@ -79,8 +79,10 @@ class MfD3d11Decoder implements PlatformDecoder {
 
     // Let the session create its own hardware D3D11 device (nullptr) on the
     // primary adapter — the player's Dawn is on the same adapter, so the shared
-    // handle opens there.
-    final session = mfdecCreate(nullptr, codec, nullptr, 0);
+    // handle opens there. Coded-dims hint: required by the HEVC decoder MFT
+    // (frame size on the input type), harmless for H.264.
+    final session = mfdecCreate(nullptr, codec, nullptr, 0,
+        width: config.width ?? 0, height: config.height ?? 0);
     if (session == nullptr) return null;
 
     final out = calloc<MiniAVMfDecFrame>();

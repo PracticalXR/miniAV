@@ -64,6 +64,13 @@ MINIAV_API MiniAVResultCode MiniAV_SetLogCallback(MiniAVLogCallback callback,
                                                   void *user_data);
 MINIAV_API MiniAVResultCode MiniAV_SetLogLevel(MiniAVLogLevel level);
 MINIAV_API const char *MiniAV_GetErrorString(MiniAVResultCode code);
+// Releases every native resource backing a delivered MiniAVBuffer. MUST be
+// called exactly once per buffer handed to a capture callback.
+//
+// On the GPU paths this ALSO closes the shared NT handle / GPU handle that was
+// exposed in planes[0].data_ptr — miniav owns it, the app must not close it,
+// and the app must have finished importing it before calling this. Treat the
+// handle as invalid the instant this returns.
 MINIAV_API MiniAVResultCode MiniAV_ReleaseBuffer(void *internal_handle);
 MINIAV_API MiniAVResultCode MiniAV_Free(void *ptr);
 MINIAV_API MiniAVResultCode MiniAV_FreeDeviceList(MiniAVDeviceInfo *devices,
@@ -293,6 +300,14 @@ MINIAV_API MiniAVResultCode
 MiniAV_Input_StartCapture(MiniAVInputContextHandle context);
 MINIAV_API MiniAVResultCode
 MiniAV_Input_StopCapture(MiniAVInputContextHandle context);
+
+// Pull the most recent IMU / motion sample (the poll surface for a parallax
+// render loop / game tick, avoiding the per-sample callback firehose). Returns
+// MINIAV_ERROR_NOT_RUNNING if motion capture is inactive or no sample has
+// arrived yet, in which case *out_event is left unchanged.
+MINIAV_API MiniAVResultCode
+MiniAV_Input_GetLatestMotion(MiniAVInputContextHandle context,
+                            MiniAVMotionEvent *out_event);
 
 // Subscribe for gamepad add/remove notifications.
 MINIAV_API MiniAVResultCode MiniAV_Input_SetGamepadChangeCallback(

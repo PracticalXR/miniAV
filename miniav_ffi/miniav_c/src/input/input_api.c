@@ -6,6 +6,13 @@
 #include "input_context.h"
 #include <string.h>
 
+#if defined(__APPLE__)
+// macOS vs iOS backend selection below hinges on TARGET_OS_IOS. Include this
+// explicitly so an undefined macro can never silently evaluate to 0 and pick
+// the wrong backend. (Also pulled in transitively via input_context.h.)
+#include <TargetConditionals.h>
+#endif
+
 // --- Backend Table ---
 static const MiniAVInputBackend g_input_backends[] = {
 #if defined(_WIN32)
@@ -14,9 +21,17 @@ static const MiniAVInputBackend g_input_backends[] = {
 #elif defined(__linux__) && !defined(__ANDROID__)
     {"LinuxEvdev", &g_input_ops_linux,
      miniav_input_context_platform_init_linux},
+#elif defined(__ANDROID__)
+    {"AndroidSensorMotion", &g_input_ops_android,
+     miniav_input_context_platform_init_android},
 #elif defined(__APPLE__)
+#if TARGET_OS_IOS
+    {"iOSCoreMotion", &g_input_ops_ios,
+     miniav_input_context_platform_init_ios},
+#else
     {"macOSEventTap+IOKit", &g_input_ops_macos,
      miniav_input_context_platform_init_macos},
+#endif
 #endif
     {NULL, NULL, NULL} // Sentinel
 };
@@ -300,6 +315,32 @@ MiniAV_Input_StopCapture(MiniAVInputContextHandle context_handle) {
                "Failed to stop input capture, code: %d", res);
   }
   return res;
+}
+
+MiniAVResultCode
+MiniAV_Input_GetLatestMotion(MiniAVInputContextHandle context_handle,
+                            MiniAVMotionEvent *out_event) {
+  MiniAVInputContext *ctx = (MiniAVInputContext *)context_handle;
+  if (!ctx || !out_event) {
+    return MINIAV_ERROR_INVALID_ARG;
+  }
+  if (!ctx->is_running || !ctx->has_latest_motion) {
+    return MINIAV_ERROR_NOT_RUNNING;
+  }
+  *out_event = ctx->latest_motion;
+  return MINIAV_SUCCESS;
+}
+
+void miniav_input_deliver_motion(MiniAVInputContext *ctx,
+                                 const MiniAVMotionEvent *event) {
+  if (!ctx || !event) {
+    return;
+  }
+  ctx->latest_motion = *event;
+  ctx->has_latest_motion = 1;
+  if (ctx->config.motion_callback) {
+    ctx->config.motion_callback(event, ctx->config.user_data);
+  }
 }
 
 // --- Subscriptions ---

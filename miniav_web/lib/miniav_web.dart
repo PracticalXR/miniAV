@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:js_interop';
+import 'dart:js_interop_unsafe';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:miniav_platform_interface/miniav_platform_interface.dart';
 import 'package:web/web.dart' as web;

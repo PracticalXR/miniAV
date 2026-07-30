@@ -154,6 +154,88 @@ int swDecode(SwAudioLib lib, Pointer<Uint8> data, int len,
 
 void swFree(Pointer<Void> p) => _swFree(p);
 
+// --- Seekable streaming sw-audio decode --------------------------------------
+// A native handle owns a copy of the compressed bytes and decodes PCM on demand
+// with random seek. All calls are synchronous. Handles are opaque Pointer<Void>.
+
+typedef _SwStreamOpenNative = Pointer<Void> Function(
+    Pointer<Uint8>, Int32, Pointer<Int32>, Pointer<Int32>, Pointer<Int64>);
+typedef _SwStreamReadNative = Int32 Function(
+    Pointer<Void>, Pointer<Float>, Int32);
+typedef _SwStreamSeekNative = Int32 Function(Pointer<Void>, Int64);
+typedef _SwStreamCloseNative = Void Function(Pointer<Void>);
+
+@Native<_SwStreamOpenNative>(symbol: 'miniav_mp3_stream_open')
+external Pointer<Void> _mp3StreamOpen(Pointer<Uint8> data, int len,
+    Pointer<Int32> channels, Pointer<Int32> rate, Pointer<Int64> totalFrames);
+@Native<_SwStreamReadNative>(symbol: 'miniav_mp3_stream_read')
+external int _mp3StreamRead(Pointer<Void> h, Pointer<Float> out, int frames);
+@Native<_SwStreamSeekNative>(symbol: 'miniav_mp3_stream_seek')
+external int _mp3StreamSeek(Pointer<Void> h, int frame);
+@Native<_SwStreamCloseNative>(symbol: 'miniav_mp3_stream_close')
+external void _mp3StreamClose(Pointer<Void> h);
+
+@Native<_SwStreamOpenNative>(symbol: 'miniav_flac_stream_open')
+external Pointer<Void> _flacStreamOpen(Pointer<Uint8> data, int len,
+    Pointer<Int32> channels, Pointer<Int32> rate, Pointer<Int64> totalFrames);
+@Native<_SwStreamReadNative>(symbol: 'miniav_flac_stream_read')
+external int _flacStreamRead(Pointer<Void> h, Pointer<Float> out, int frames);
+@Native<_SwStreamSeekNative>(symbol: 'miniav_flac_stream_seek')
+external int _flacStreamSeek(Pointer<Void> h, int frame);
+@Native<_SwStreamCloseNative>(symbol: 'miniav_flac_stream_close')
+external void _flacStreamClose(Pointer<Void> h);
+
+@Native<_SwStreamOpenNative>(symbol: 'miniav_vorbis_stream_open')
+external Pointer<Void> _vorbisStreamOpen(Pointer<Uint8> data, int len,
+    Pointer<Int32> channels, Pointer<Int32> rate, Pointer<Int64> totalFrames);
+@Native<_SwStreamReadNative>(symbol: 'miniav_vorbis_stream_read')
+external int _vorbisStreamRead(Pointer<Void> h, Pointer<Float> out, int frames);
+@Native<_SwStreamSeekNative>(symbol: 'miniav_vorbis_stream_seek')
+external int _vorbisStreamSeek(Pointer<Void> h, int frame);
+@Native<_SwStreamCloseNative>(symbol: 'miniav_vorbis_stream_close')
+external void _vorbisStreamClose(Pointer<Void> h);
+
+/// Open a seekable streaming decoder over a compressed buffer. Returns an
+/// opaque handle (or `nullptr` on failure) and reports channels/rate/total
+/// frames. The native side copies [data], so it need not outlive this call.
+Pointer<Void> swStreamOpen(SwAudioLib lib, Pointer<Uint8> data, int len,
+        Pointer<Int32> channels, Pointer<Int32> rate,
+        Pointer<Int64> totalFrames) =>
+    switch (lib) {
+      SwAudioLib.mp3 => _mp3StreamOpen(data, len, channels, rate, totalFrames),
+      SwAudioLib.flac => _flacStreamOpen(data, len, channels, rate, totalFrames),
+      SwAudioLib.vorbis =>
+        _vorbisStreamOpen(data, len, channels, rate, totalFrames),
+    };
+
+/// Read up to [frames] interleaved-f32 frames into [out]; returns frames read.
+int swStreamRead(SwAudioLib lib, Pointer<Void> h, Pointer<Float> out,
+        int frames) =>
+    switch (lib) {
+      SwAudioLib.mp3 => _mp3StreamRead(h, out, frames),
+      SwAudioLib.flac => _flacStreamRead(h, out, frames),
+      SwAudioLib.vorbis => _vorbisStreamRead(h, out, frames),
+    };
+
+/// Seek so the next read starts at PCM [frame]. Returns true on success.
+bool swStreamSeek(SwAudioLib lib, Pointer<Void> h, int frame) =>
+    switch (lib) {
+      SwAudioLib.mp3 => _mp3StreamSeek(h, frame) != 0,
+      SwAudioLib.flac => _flacStreamSeek(h, frame) != 0,
+      SwAudioLib.vorbis => _vorbisStreamSeek(h, frame) != 0,
+    };
+
+void swStreamClose(SwAudioLib lib, Pointer<Void> h) {
+  switch (lib) {
+    case SwAudioLib.mp3:
+      _mp3StreamClose(h);
+    case SwAudioLib.flac:
+      _flacStreamClose(h);
+    case SwAudioLib.vorbis:
+      _vorbisStreamClose(h);
+  }
+}
+
 // -----------------------------------------------------------------------------
 // Media Foundation AAC decode + encode (Windows only) — mf_aac.c
 // -----------------------------------------------------------------------------
@@ -322,7 +404,9 @@ final class MiniAVMfDecFrame extends Struct {
 @Native<Int32 Function(Int32)>(symbol: 'miniav_shim_mfdec_has_hardware')
 external int _mfdecHasHardware(int codec);
 
-@Native<Pointer<Void> Function(Pointer<Void>, Int32, Pointer<Uint8>, Int32)>(
+@Native<
+    Pointer<Void> Function(
+        Pointer<Void>, Int32, Pointer<Uint8>, Int32, Int32, Int32)>(
   symbol: 'miniav_shim_mfdec_create',
 )
 external Pointer<Void> _mfdecCreate(
@@ -330,6 +414,8 @@ external Pointer<Void> _mfdecCreate(
   int codec,
   Pointer<Uint8> extradata,
   int extradataSize,
+  int width,
+  int height,
 );
 
 @Native<Int32 Function(Pointer<Void>, Pointer<Uint8>, Int32, Int64, Int32)>(
@@ -377,13 +463,19 @@ external void _mfdecDestroy(Pointer<Void> session);
 bool mfdecHasHardware(int codec) => _mfdecHasHardware(codec) != 0;
 
 /// Open a decode session. [device] is an `ID3D11Device*` (or `nullptr` for an
-/// own device). Returns `nullptr` on failure (no HW MFT / STA thread).
+/// own device). [width]/[height] are a coded-dims hint (0 = unknown) — the
+/// HEVC decoder MFT requires them on the input type (see mf_decoder.c);
+/// H.264 works without. Returns `nullptr` on failure (no HW MFT / STA
+/// thread).
 Pointer<Void> mfdecCreate(
   Pointer<Void> device,
   int codec,
   Pointer<Uint8> extradata,
-  int extradataSize,
-) => _mfdecCreate(device, codec, extradata, extradataSize);
+  int extradataSize, {
+  int width = 0,
+  int height = 0,
+}) =>
+    _mfdecCreate(device, codec, extradata, extradataSize, width, height);
 
 /// Feed one encoded packet. 0 = OK, <0 = error.
 int mfdecSend(
