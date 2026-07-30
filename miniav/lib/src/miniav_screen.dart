@@ -24,6 +24,28 @@ class MiniScreen {
     final context = await _platform.createContext();
     return MiniScreenContext._(context);
   }
+
+  /// Subscribe to display add/remove notifications.
+  /// Returns a disposer that must be called to unsubscribe.
+  static void Function() addDisplayChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => _platform.addDisplayChangeListener(listener);
+
+  /// Subscribe to window add/remove notifications.
+  /// Returns a disposer that must be called to unsubscribe.
+  static void Function() addWindowChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => _platform.addWindowChangeListener(listener);
+
+  /// iOS only: register the App Group ID shared between the app and its
+  /// Broadcast Upload Extension (e.g. `group.com.example.yourapp`).
+  ///
+  /// Must be called before configuring the `system_screen_broadcast`
+  /// pseudo-display. See the README's iOS Permissions section and
+  /// `miniav_c/src/screen/ios/broadcast_extension/SETUP.md` for the full
+  /// extension setup. Throws on every other platform.
+  static Future<void> setIOSAppGroup(String appGroupId) =>
+      _platform.setIOSAppGroup(appGroupId);
 }
 
 /// Screen capture context for configuration and capture operations
@@ -46,6 +68,13 @@ class MiniScreenContext {
     bool captureAudio = false,
   }) => _context.configureWindow(windowId, format, captureAudio: captureAudio);
 
+  /// Include the mouse cursor in captured frames (off by default). Call BEFORE
+  /// [configureDisplay] / [configureWindow]. Honored on Windows WGC, macOS
+  /// ScreenCaptureKit, and Linux PipeWire; Windows DXGI cannot draw the cursor
+  /// and captures cursor-less (use the WGC backend for a visible cursor).
+  Future<void> setCaptureCursor(bool enabled) =>
+      _context.setCaptureCursor(enabled);
+
   /// Get the currently configured formats
   Future<ScreenFormatDefaults> getConfiguredFormats() =>
       _context.getConfiguredFormats();
@@ -62,4 +91,11 @@ class MiniScreenContext {
 
   /// Destroy the context and release resources
   Future<void> destroy() => _context.destroy();
+
+  /// Subscribe to a context-lost notification (e.g. captured display
+  /// disconnected, captured window closed). Fired from a capture thread; do
+  /// NOT call [destroy] synchronously from inside the listener. Returns a
+  /// disposer that must be called to unsubscribe.
+  void Function() addLostListener(MiniAVContextLostListener listener) =>
+      _context.addLostListener(listener);
 }

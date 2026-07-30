@@ -88,6 +88,10 @@ typedef struct MiniAVLoopbackContext {
   MiniAVLoopbackTargetInfo current_target_info;
   char current_target_device_id[MINIAV_DEVICE_ID_MAX_LEN];
 
+  // Set via MiniAV_Loopback_SetContextLostCallback. May be NULL.
+  MiniAVContextLostCallback lost_cb;
+  void *lost_cb_user_data;
+
 } MiniAVLoopbackContext;
 
 #ifdef __cplusplus

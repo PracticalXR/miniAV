@@ -13,8 +13,12 @@
 import 'dart:ffi' as ffi;
 
 @ffi.Native<
-    ffi.Int Function(ffi.Pointer<ffi.Uint32>, ffi.Pointer<ffi.Uint32>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_GetVersion')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Pointer<ffi.Uint32>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_GetVersion')
 external int _MiniAV_GetVersion(
   ffi.Pointer<ffi.Uint32> major,
   ffi.Pointer<ffi.Uint32> minor,
@@ -25,18 +29,14 @@ MiniAVResultCode MiniAV_GetVersion(
   ffi.Pointer<ffi.Uint32> major,
   ffi.Pointer<ffi.Uint32> minor,
   ffi.Pointer<ffi.Uint32> patch,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_GetVersion(
-      major,
-      minor,
-      patch,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_GetVersion(major, minor, patch));
 
 @ffi.Native<ffi.Pointer<ffi.Char> Function()>()
 external ffi.Pointer<ffi.Char> MiniAV_GetVersionString();
 
 @ffi.Native<ffi.Int Function(MiniAVLogCallback, ffi.Pointer<ffi.Void>)>(
-    symbol: 'MiniAV_SetLogCallback')
+  symbol: 'MiniAV_SetLogCallback',
+)
 external int _MiniAV_SetLogCallback(
   MiniAVLogCallback callback,
   ffi.Pointer<ffi.Void> user_data,
@@ -45,64 +45,39 @@ external int _MiniAV_SetLogCallback(
 MiniAVResultCode MiniAV_SetLogCallback(
   MiniAVLogCallback callback,
   ffi.Pointer<ffi.Void> user_data,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_SetLogCallback(
-      callback,
-      user_data,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_SetLogCallback(callback, user_data));
 
 @ffi.Native<ffi.Int Function(ffi.UnsignedInt)>(symbol: 'MiniAV_SetLogLevel')
-external int _MiniAV_SetLogLevel(
-  int level,
-);
+external int _MiniAV_SetLogLevel(int level);
 
-MiniAVResultCode MiniAV_SetLogLevel(
-  MiniAVLogLevel level,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_SetLogLevel(
-      level.value,
-    ));
+MiniAVResultCode MiniAV_SetLogLevel(MiniAVLogLevel level) =>
+    MiniAVResultCode.fromValue(_MiniAV_SetLogLevel(level.value));
 
 @ffi.Native<ffi.Pointer<ffi.Char> Function(ffi.Int)>(
-    symbol: 'MiniAV_GetErrorString')
-external ffi.Pointer<ffi.Char> _MiniAV_GetErrorString(
-  int code,
-);
+  symbol: 'MiniAV_GetErrorString',
+)
+external ffi.Pointer<ffi.Char> _MiniAV_GetErrorString(int code);
 
-ffi.Pointer<ffi.Char> MiniAV_GetErrorString(
-  MiniAVResultCode code,
-) =>
-    _MiniAV_GetErrorString(
-      code.value,
-    );
+ffi.Pointer<ffi.Char> MiniAV_GetErrorString(MiniAVResultCode code) =>
+    _MiniAV_GetErrorString(code.value);
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Void>)>(
-    symbol: 'MiniAV_ReleaseBuffer')
-external int _MiniAV_ReleaseBuffer(
-  ffi.Pointer<ffi.Void> internal_handle,
-);
+  symbol: 'MiniAV_ReleaseBuffer',
+)
+external int _MiniAV_ReleaseBuffer(ffi.Pointer<ffi.Void> internal_handle);
 
-MiniAVResultCode MiniAV_ReleaseBuffer(
-  ffi.Pointer<ffi.Void> internal_handle,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_ReleaseBuffer(
-      internal_handle,
-    ));
+MiniAVResultCode MiniAV_ReleaseBuffer(ffi.Pointer<ffi.Void> internal_handle) =>
+    MiniAVResultCode.fromValue(_MiniAV_ReleaseBuffer(internal_handle));
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Void>)>(symbol: 'MiniAV_Free')
-external int _MiniAV_Free(
-  ffi.Pointer<ffi.Void> ptr,
-);
+external int _MiniAV_Free(ffi.Pointer<ffi.Void> ptr);
 
-MiniAVResultCode MiniAV_Free(
-  ffi.Pointer<ffi.Void> ptr,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Free(
-      ptr,
-    ));
+MiniAVResultCode MiniAV_Free(ffi.Pointer<ffi.Void> ptr) =>
+    MiniAVResultCode.fromValue(_MiniAV_Free(ptr));
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<MiniAVDeviceInfo>, ffi.Uint32)>(
-    symbol: 'MiniAV_FreeDeviceList')
+  symbol: 'MiniAV_FreeDeviceList',
+)
 external int _MiniAV_FreeDeviceList(
   ffi.Pointer<MiniAVDeviceInfo> devices,
   int count,
@@ -111,31 +86,45 @@ external int _MiniAV_FreeDeviceList(
 MiniAVResultCode MiniAV_FreeDeviceList(
   ffi.Pointer<MiniAVDeviceInfo> devices,
   int count,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_FreeDeviceList(
-      devices,
-      count,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_FreeDeviceList(devices, count));
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Void>, ffi.Uint32)>(
-    symbol: 'MiniAV_FreeFormatList')
-external int _MiniAV_FreeFormatList(
-  ffi.Pointer<ffi.Void> formats,
-  int count,
-);
+  symbol: 'MiniAV_FreeFormatList',
+)
+external int _MiniAV_FreeFormatList(ffi.Pointer<ffi.Void> formats, int count);
 
 MiniAVResultCode MiniAV_FreeFormatList(
   ffi.Pointer<ffi.Void> formats,
   int count,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_FreeFormatList(
-      formats,
-      count,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_FreeFormatList(formats, count));
+
+// --- Global lifecycle ---
+
+@ffi.Native<ffi.Int Function()>(symbol: 'MiniAV_Dispose')
+external int _MiniAV_Dispose();
+
+/// Atomically disables all callback dispatch and waits for any in-flight
+/// callback invocations to complete.  Call this before tearing down Dart
+/// [NativeCallable] handles (e.g. from Flutter's [reassemble]) to prevent
+/// "Callback invoked after it has been deleted" fatal crashes on hot restart.
+MiniAVResultCode MiniAV_Dispose() =>
+    MiniAVResultCode.fromValue(_MiniAV_Dispose());
+
+@ffi.Native<ffi.Int Function()>(symbol: 'MiniAV_EnableCallbacks')
+external int _MiniAV_EnableCallbacks();
+
+/// Re-enables callback dispatch after a [MiniAV_Dispose] call.  Called
+/// automatically by every `MiniAV_*_StartCapture` C function — explicit Dart
+/// calls are rarely needed.
+MiniAVResultCode MiniAV_EnableCallbacks() =>
+    MiniAVResultCode.fromValue(_MiniAV_EnableCallbacks());
 
 @ffi.Native<
-    ffi.Int Function(ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_Camera_EnumerateDevices')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Camera_EnumerateDevices')
 external int _MiniAV_Camera_EnumerateDevices(
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> devices,
   ffi.Pointer<ffi.Uint32> count,
@@ -145,16 +134,15 @@ MiniAVResultCode MiniAV_Camera_EnumerateDevices(
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> devices,
   ffi.Pointer<ffi.Uint32> count,
 ) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_EnumerateDevices(
-      devices,
-      count,
-    ));
+    MiniAVResultCode.fromValue(_MiniAV_Camera_EnumerateDevices(devices, count));
 
 @ffi.Native<
-    ffi.Int Function(
-        ffi.Pointer<ffi.Char>,
-        ffi.Pointer<ffi.Pointer<MiniAVVideoInfo>>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_Camera_GetSupportedFormats')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Pointer<MiniAVVideoInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Camera_GetSupportedFormats')
 external int _MiniAV_Camera_GetSupportedFormats(
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<ffi.Pointer<MiniAVVideoInfo>> formats,
@@ -165,16 +153,13 @@ MiniAVResultCode MiniAV_Camera_GetSupportedFormats(
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<ffi.Pointer<MiniAVVideoInfo>> formats,
   ffi.Pointer<ffi.Uint32> count,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_GetSupportedFormats(
-      device_id,
-      formats,
-      count,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Camera_GetSupportedFormats(device_id, formats, count),
+);
 
 @ffi.Native<
-        ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<MiniAVVideoInfo>)>(
-    symbol: 'MiniAV_Camera_GetDefaultFormat')
+  ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<MiniAVVideoInfo>)
+>(symbol: 'MiniAV_Camera_GetDefaultFormat')
 external int _MiniAV_Camera_GetDefaultFormat(
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<MiniAVVideoInfo> format_out,
@@ -183,16 +168,13 @@ external int _MiniAV_Camera_GetDefaultFormat(
 MiniAVResultCode MiniAV_Camera_GetDefaultFormat(
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<MiniAVVideoInfo> format_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_GetDefaultFormat(
-      device_id,
-      format_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Camera_GetDefaultFormat(device_id, format_out),
+);
 
 @ffi.Native<
-        ffi.Int Function(
-            MiniAVCameraContextHandle, ffi.Pointer<MiniAVVideoInfo>)>(
-    symbol: 'MiniAV_Camera_GetConfiguredFormat')
+  ffi.Int Function(MiniAVCameraContextHandle, ffi.Pointer<MiniAVVideoInfo>)
+>(symbol: 'MiniAV_Camera_GetConfiguredFormat')
 external int _MiniAV_Camera_GetConfiguredFormat(
   MiniAVCameraContextHandle context,
   ffi.Pointer<MiniAVVideoInfo> format_out,
@@ -201,41 +183,37 @@ external int _MiniAV_Camera_GetConfiguredFormat(
 MiniAVResultCode MiniAV_Camera_GetConfiguredFormat(
   MiniAVCameraContextHandle context,
   ffi.Pointer<MiniAVVideoInfo> format_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_GetConfiguredFormat(
-      context,
-      format_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Camera_GetConfiguredFormat(context, format_out),
+);
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<MiniAVCameraContextHandle>)>(
-    symbol: 'MiniAV_Camera_CreateContext')
+  symbol: 'MiniAV_Camera_CreateContext',
+)
 external int _MiniAV_Camera_CreateContext(
   ffi.Pointer<MiniAVCameraContextHandle> context,
 );
 
 MiniAVResultCode MiniAV_Camera_CreateContext(
   ffi.Pointer<MiniAVCameraContextHandle> context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_CreateContext(
-      context,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_Camera_CreateContext(context));
 
 @ffi.Native<ffi.Int Function(MiniAVCameraContextHandle)>(
-    symbol: 'MiniAV_Camera_DestroyContext')
-external int _MiniAV_Camera_DestroyContext(
-  MiniAVCameraContextHandle context,
-);
+  symbol: 'MiniAV_Camera_DestroyContext',
+)
+external int _MiniAV_Camera_DestroyContext(MiniAVCameraContextHandle context);
 
 MiniAVResultCode MiniAV_Camera_DestroyContext(
   MiniAVCameraContextHandle context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_DestroyContext(
-      context,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_Camera_DestroyContext(context));
 
 @ffi.Native<
-    ffi.Int Function(MiniAVCameraContextHandle, ffi.Pointer<ffi.Char>,
-        ffi.Pointer<ffi.Void>)>(symbol: 'MiniAV_Camera_Configure')
+  ffi.Int Function(
+    MiniAVCameraContextHandle,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Camera_Configure')
 external int _MiniAV_Camera_Configure(
   MiniAVCameraContextHandle context,
   ffi.Pointer<ffi.Char> device_id,
@@ -246,16 +224,17 @@ MiniAVResultCode MiniAV_Camera_Configure(
   MiniAVCameraContextHandle context,
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<ffi.Void> format,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_Configure(
-      context,
-      device_id,
-      format,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Camera_Configure(context, device_id, format),
+);
 
 @ffi.Native<
-    ffi.Int Function(MiniAVCameraContextHandle, MiniAVBufferCallback,
-        ffi.Pointer<ffi.Void>)>(symbol: 'MiniAV_Camera_StartCapture')
+  ffi.Int Function(
+    MiniAVCameraContextHandle,
+    MiniAVBufferCallback,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Camera_StartCapture')
 external int _MiniAV_Camera_StartCapture(
   MiniAVCameraContextHandle context,
   MiniAVBufferCallback callback,
@@ -266,42 +245,60 @@ MiniAVResultCode MiniAV_Camera_StartCapture(
   MiniAVCameraContextHandle context,
   MiniAVBufferCallback callback,
   ffi.Pointer<ffi.Void> user_data,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_StartCapture(
-      context,
-      callback,
-      user_data,
-    ));
-
-@ffi.Native<ffi.Int Function(MiniAVCameraContextHandle)>(
-    symbol: 'MiniAV_Camera_StopCapture')
-external int _MiniAV_Camera_StopCapture(
-  MiniAVCameraContextHandle context,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Camera_StartCapture(context, callback, user_data),
 );
 
-MiniAVResultCode MiniAV_Camera_StopCapture(
-  MiniAVCameraContextHandle context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Camera_StopCapture(
-      context,
-    ));
+@ffi.Native<ffi.Int Function(MiniAVCameraContextHandle)>(
+  symbol: 'MiniAV_Camera_StopCapture',
+)
+external int _MiniAV_Camera_StopCapture(MiniAVCameraContextHandle context);
+
+MiniAVResultCode MiniAV_Camera_StopCapture(MiniAVCameraContextHandle context) =>
+    MiniAVResultCode.fromValue(_MiniAV_Camera_StopCapture(context));
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<MiniAVScreenContextHandle>)>(
-    symbol: 'MiniAV_Screen_CreateContext')
+  symbol: 'MiniAV_Screen_CreateContext',
+)
 external int _MiniAV_Screen_CreateContext(
   ffi.Pointer<MiniAVScreenContextHandle> context,
 );
 
 MiniAVResultCode MiniAV_Screen_CreateContext(
   ffi.Pointer<MiniAVScreenContextHandle> context,
+) => MiniAVResultCode.fromValue(_MiniAV_Screen_CreateContext(context));
+
+@ffi.Native<ffi.Int Function(ffi.Pointer<ffi.Char>)>(
+  symbol: 'MiniAV_Screen_SetIOSAppGroup',
+)
+external int _MiniAV_Screen_SetIOSAppGroup(ffi.Pointer<ffi.Char> app_group_id);
+
+MiniAVResultCode MiniAV_Screen_SetIOSAppGroup(
+  ffi.Pointer<ffi.Char> app_group_id,
+) => MiniAVResultCode.fromValue(_MiniAV_Screen_SetIOSAppGroup(app_group_id));
+
+@ffi.Native<ffi.Int Function(MiniAVScreenContextHandle, ffi.Bool)>(
+  symbol: 'MiniAV_Screen_SetCaptureCursor',
+)
+external int _MiniAV_Screen_SetCaptureCursor(
+  MiniAVScreenContextHandle context,
+  bool enabled,
+);
+
+MiniAVResultCode MiniAV_Screen_SetCaptureCursor(
+  MiniAVScreenContextHandle context,
+  bool enabled,
 ) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_CreateContext(
-      context,
-    ));
+    MiniAVResultCode.fromValue(
+      _MiniAV_Screen_SetCaptureCursor(context, enabled),
+    );
 
 @ffi.Native<
-    ffi.Int Function(ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_Screen_EnumerateDisplays')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Screen_EnumerateDisplays')
 external int _MiniAV_Screen_EnumerateDisplays(
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> displays_out,
   ffi.Pointer<ffi.Uint32> count_out,
@@ -310,15 +307,16 @@ external int _MiniAV_Screen_EnumerateDisplays(
 MiniAVResultCode MiniAV_Screen_EnumerateDisplays(
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> displays_out,
   ffi.Pointer<ffi.Uint32> count_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_EnumerateDisplays(
-      displays_out,
-      count_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_EnumerateDisplays(displays_out, count_out),
+);
 
 @ffi.Native<
-    ffi.Int Function(ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_Screen_EnumerateWindows')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Screen_EnumerateWindows')
 external int _MiniAV_Screen_EnumerateWindows(
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> windows,
   ffi.Pointer<ffi.Uint32> count,
@@ -328,15 +326,15 @@ MiniAVResultCode MiniAV_Screen_EnumerateWindows(
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> windows,
   ffi.Pointer<ffi.Uint32> count,
 ) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_EnumerateWindows(
-      windows,
-      count,
-    ));
+    MiniAVResultCode.fromValue(_MiniAV_Screen_EnumerateWindows(windows, count));
 
 @ffi.Native<
-        ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<MiniAVVideoInfo>,
-            ffi.Pointer<MiniAVAudioInfo>)>(
-    symbol: 'MiniAV_Screen_GetDefaultFormats')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<MiniAVVideoInfo>,
+    ffi.Pointer<MiniAVAudioInfo>,
+  )
+>(symbol: 'MiniAV_Screen_GetDefaultFormats')
 external int _MiniAV_Screen_GetDefaultFormats(
   ffi.Pointer<ffi.Char> display_id,
   ffi.Pointer<MiniAVVideoInfo> video_format_out,
@@ -347,32 +345,31 @@ MiniAVResultCode MiniAV_Screen_GetDefaultFormats(
   ffi.Pointer<ffi.Char> display_id,
   ffi.Pointer<MiniAVVideoInfo> video_format_out,
   ffi.Pointer<MiniAVAudioInfo> audio_format_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_GetDefaultFormats(
-      display_id,
-      video_format_out,
-      audio_format_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_GetDefaultFormats(
+    display_id,
+    video_format_out,
+    audio_format_out,
+  ),
+);
 
 @ffi.Native<ffi.Int Function(MiniAVScreenContextHandle)>(
-    symbol: 'MiniAV_Screen_DestroyContext')
-external int _MiniAV_Screen_DestroyContext(
-  MiniAVScreenContextHandle context,
-);
+  symbol: 'MiniAV_Screen_DestroyContext',
+)
+external int _MiniAV_Screen_DestroyContext(MiniAVScreenContextHandle context);
 
 MiniAVResultCode MiniAV_Screen_DestroyContext(
   MiniAVScreenContextHandle context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_DestroyContext(
-      context,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_Screen_DestroyContext(context));
 
 @ffi.Native<
-    ffi.Int Function(
-        MiniAVScreenContextHandle,
-        ffi.Pointer<ffi.Char>,
-        ffi.Pointer<MiniAVVideoInfo>,
-        ffi.Bool)>(symbol: 'MiniAV_Screen_ConfigureDisplay')
+  ffi.Int Function(
+    MiniAVScreenContextHandle,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<MiniAVVideoInfo>,
+    ffi.Bool,
+  )
+>(symbol: 'MiniAV_Screen_ConfigureDisplay')
 external int _MiniAV_Screen_ConfigureDisplay(
   MiniAVScreenContextHandle context,
   ffi.Pointer<ffi.Char> display_id,
@@ -385,20 +382,18 @@ MiniAVResultCode MiniAV_Screen_ConfigureDisplay(
   ffi.Pointer<ffi.Char> display_id,
   ffi.Pointer<MiniAVVideoInfo> format,
   bool capture_audio,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_ConfigureDisplay(
-      context,
-      display_id,
-      format,
-      capture_audio,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_ConfigureDisplay(context, display_id, format, capture_audio),
+);
 
 @ffi.Native<
-    ffi.Int Function(
-        MiniAVScreenContextHandle,
-        ffi.Pointer<ffi.Char>,
-        ffi.Pointer<MiniAVVideoInfo>,
-        ffi.Bool)>(symbol: 'MiniAV_Screen_ConfigureWindow')
+  ffi.Int Function(
+    MiniAVScreenContextHandle,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<MiniAVVideoInfo>,
+    ffi.Bool,
+  )
+>(symbol: 'MiniAV_Screen_ConfigureWindow')
 external int _MiniAV_Screen_ConfigureWindow(
   MiniAVScreenContextHandle context,
   ffi.Pointer<ffi.Char> window_id,
@@ -411,24 +406,22 @@ MiniAVResultCode MiniAV_Screen_ConfigureWindow(
   ffi.Pointer<ffi.Char> window_id,
   ffi.Pointer<MiniAVVideoInfo> format,
   bool capture_audio,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_ConfigureWindow(
-      context,
-      window_id,
-      format,
-      capture_audio,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_ConfigureWindow(context, window_id, format, capture_audio),
+);
 
 @ffi.Native<
-    ffi.Int Function(
-        MiniAVScreenContextHandle,
-        ffi.Pointer<ffi.Char>,
-        ffi.Int,
-        ffi.Int,
-        ffi.Int,
-        ffi.Int,
-        ffi.Pointer<MiniAVVideoInfo>,
-        ffi.Bool)>(symbol: 'MiniAV_Screen_ConfigureRegion')
+  ffi.Int Function(
+    MiniAVScreenContextHandle,
+    ffi.Pointer<ffi.Char>,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Int,
+    ffi.Pointer<MiniAVVideoInfo>,
+    ffi.Bool,
+  )
+>(symbol: 'MiniAV_Screen_ConfigureRegion')
 external int _MiniAV_Screen_ConfigureRegion(
   MiniAVScreenContextHandle context,
   ffi.Pointer<ffi.Char> display_id,
@@ -449,22 +442,26 @@ MiniAVResultCode MiniAV_Screen_ConfigureRegion(
   int height,
   ffi.Pointer<MiniAVVideoInfo> format,
   bool capture_audio,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_ConfigureRegion(
-      context,
-      display_id,
-      x,
-      y,
-      width,
-      height,
-      format,
-      capture_audio,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_ConfigureRegion(
+    context,
+    display_id,
+    x,
+    y,
+    width,
+    height,
+    format,
+    capture_audio,
+  ),
+);
 
 @ffi.Native<
-        ffi.Int Function(MiniAVScreenContextHandle,
-            ffi.Pointer<MiniAVVideoInfo>, ffi.Pointer<MiniAVAudioInfo>)>(
-    symbol: 'MiniAV_Screen_GetConfiguredFormats')
+  ffi.Int Function(
+    MiniAVScreenContextHandle,
+    ffi.Pointer<MiniAVVideoInfo>,
+    ffi.Pointer<MiniAVAudioInfo>,
+  )
+>(symbol: 'MiniAV_Screen_GetConfiguredFormats')
 external int _MiniAV_Screen_GetConfiguredFormats(
   MiniAVScreenContextHandle context,
   ffi.Pointer<MiniAVVideoInfo> video_format_out,
@@ -475,16 +472,21 @@ MiniAVResultCode MiniAV_Screen_GetConfiguredFormats(
   MiniAVScreenContextHandle context,
   ffi.Pointer<MiniAVVideoInfo> video_format_out,
   ffi.Pointer<MiniAVAudioInfo> audio_format_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_GetConfiguredFormats(
-      context,
-      video_format_out,
-      audio_format_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_GetConfiguredFormats(
+    context,
+    video_format_out,
+    audio_format_out,
+  ),
+);
 
 @ffi.Native<
-    ffi.Int Function(MiniAVScreenContextHandle, MiniAVBufferCallback,
-        ffi.Pointer<ffi.Void>)>(symbol: 'MiniAV_Screen_StartCapture')
+  ffi.Int Function(
+    MiniAVScreenContextHandle,
+    MiniAVBufferCallback,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Screen_StartCapture')
 external int _MiniAV_Screen_StartCapture(
   MiniAVScreenContextHandle context,
   MiniAVBufferCallback callback,
@@ -495,29 +497,24 @@ MiniAVResultCode MiniAV_Screen_StartCapture(
   MiniAVScreenContextHandle context,
   MiniAVBufferCallback callback,
   ffi.Pointer<ffi.Void> user_data,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_StartCapture(
-      context,
-      callback,
-      user_data,
-    ));
-
-@ffi.Native<ffi.Int Function(MiniAVScreenContextHandle)>(
-    symbol: 'MiniAV_Screen_StopCapture')
-external int _MiniAV_Screen_StopCapture(
-  MiniAVScreenContextHandle context,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_StartCapture(context, callback, user_data),
 );
 
-MiniAVResultCode MiniAV_Screen_StopCapture(
-  MiniAVScreenContextHandle context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Screen_StopCapture(
-      context,
-    ));
+@ffi.Native<ffi.Int Function(MiniAVScreenContextHandle)>(
+  symbol: 'MiniAV_Screen_StopCapture',
+)
+external int _MiniAV_Screen_StopCapture(MiniAVScreenContextHandle context);
+
+MiniAVResultCode MiniAV_Screen_StopCapture(MiniAVScreenContextHandle context) =>
+    MiniAVResultCode.fromValue(_MiniAV_Screen_StopCapture(context));
 
 @ffi.Native<
-    ffi.Int Function(ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_Audio_EnumerateDevices')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Audio_EnumerateDevices')
 external int _MiniAV_Audio_EnumerateDevices(
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> devices,
   ffi.Pointer<ffi.Uint32> count,
@@ -526,17 +523,15 @@ external int _MiniAV_Audio_EnumerateDevices(
 MiniAVResultCode MiniAV_Audio_EnumerateDevices(
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> devices,
   ffi.Pointer<ffi.Uint32> count,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_EnumerateDevices(
-      devices,
-      count,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_Audio_EnumerateDevices(devices, count));
 
 @ffi.Native<
-    ffi.Int Function(
-        ffi.Pointer<ffi.Char>,
-        ffi.Pointer<ffi.Pointer<MiniAVAudioInfo>>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_Audio_GetSupportedFormats')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Pointer<MiniAVAudioInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Audio_GetSupportedFormats')
 external int _MiniAV_Audio_GetSupportedFormats(
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<ffi.Pointer<MiniAVAudioInfo>> formats_out,
@@ -547,16 +542,13 @@ MiniAVResultCode MiniAV_Audio_GetSupportedFormats(
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<ffi.Pointer<MiniAVAudioInfo>> formats_out,
   ffi.Pointer<ffi.Uint32> count_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_GetSupportedFormats(
-      device_id,
-      formats_out,
-      count_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Audio_GetSupportedFormats(device_id, formats_out, count_out),
+);
 
 @ffi.Native<
-        ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<MiniAVAudioInfo>)>(
-    symbol: 'MiniAV_Audio_GetDefaultFormat')
+  ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<MiniAVAudioInfo>)
+>(symbol: 'MiniAV_Audio_GetDefaultFormat')
 external int _MiniAV_Audio_GetDefaultFormat(
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<MiniAVAudioInfo> format_out,
@@ -565,16 +557,13 @@ external int _MiniAV_Audio_GetDefaultFormat(
 MiniAVResultCode MiniAV_Audio_GetDefaultFormat(
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<MiniAVAudioInfo> format_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_GetDefaultFormat(
-      device_id,
-      format_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Audio_GetDefaultFormat(device_id, format_out),
+);
 
 @ffi.Native<
-        ffi.Int Function(
-            MiniAVAudioContextHandle, ffi.Pointer<MiniAVAudioInfo>)>(
-    symbol: 'MiniAV_Audio_GetConfiguredFormat')
+  ffi.Int Function(MiniAVAudioContextHandle, ffi.Pointer<MiniAVAudioInfo>)
+>(symbol: 'MiniAV_Audio_GetConfiguredFormat')
 external int _MiniAV_Audio_GetConfiguredFormat(
   MiniAVAudioContextHandle context,
   ffi.Pointer<MiniAVAudioInfo> format_out,
@@ -583,41 +572,37 @@ external int _MiniAV_Audio_GetConfiguredFormat(
 MiniAVResultCode MiniAV_Audio_GetConfiguredFormat(
   MiniAVAudioContextHandle context,
   ffi.Pointer<MiniAVAudioInfo> format_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_GetConfiguredFormat(
-      context,
-      format_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Audio_GetConfiguredFormat(context, format_out),
+);
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<MiniAVAudioContextHandle>)>(
-    symbol: 'MiniAV_Audio_CreateContext')
+  symbol: 'MiniAV_Audio_CreateContext',
+)
 external int _MiniAV_Audio_CreateContext(
   ffi.Pointer<MiniAVAudioContextHandle> context,
 );
 
 MiniAVResultCode MiniAV_Audio_CreateContext(
   ffi.Pointer<MiniAVAudioContextHandle> context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_CreateContext(
-      context,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_Audio_CreateContext(context));
 
 @ffi.Native<ffi.Int Function(MiniAVAudioContextHandle)>(
-    symbol: 'MiniAV_Audio_DestroyContext')
-external int _MiniAV_Audio_DestroyContext(
-  MiniAVAudioContextHandle context,
-);
+  symbol: 'MiniAV_Audio_DestroyContext',
+)
+external int _MiniAV_Audio_DestroyContext(MiniAVAudioContextHandle context);
 
 MiniAVResultCode MiniAV_Audio_DestroyContext(
   MiniAVAudioContextHandle context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_DestroyContext(
-      context,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_Audio_DestroyContext(context));
 
 @ffi.Native<
-    ffi.Int Function(MiniAVAudioContextHandle, ffi.Pointer<ffi.Char>,
-        ffi.Pointer<MiniAVAudioInfo>)>(symbol: 'MiniAV_Audio_Configure')
+  ffi.Int Function(
+    MiniAVAudioContextHandle,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<MiniAVAudioInfo>,
+  )
+>(symbol: 'MiniAV_Audio_Configure')
 external int _MiniAV_Audio_Configure(
   MiniAVAudioContextHandle context,
   ffi.Pointer<ffi.Char> device_id,
@@ -628,16 +613,17 @@ MiniAVResultCode MiniAV_Audio_Configure(
   MiniAVAudioContextHandle context,
   ffi.Pointer<ffi.Char> device_id,
   ffi.Pointer<MiniAVAudioInfo> format,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_Configure(
-      context,
-      device_id,
-      format,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Audio_Configure(context, device_id, format),
+);
 
 @ffi.Native<
-    ffi.Int Function(MiniAVAudioContextHandle, MiniAVBufferCallback,
-        ffi.Pointer<ffi.Void>)>(symbol: 'MiniAV_Audio_StartCapture')
+  ffi.Int Function(
+    MiniAVAudioContextHandle,
+    MiniAVBufferCallback,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Audio_StartCapture')
 external int _MiniAV_Audio_StartCapture(
   MiniAVAudioContextHandle context,
   MiniAVBufferCallback callback,
@@ -648,31 +634,25 @@ MiniAVResultCode MiniAV_Audio_StartCapture(
   MiniAVAudioContextHandle context,
   MiniAVBufferCallback callback,
   ffi.Pointer<ffi.Void> user_data,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_StartCapture(
-      context,
-      callback,
-      user_data,
-    ));
-
-@ffi.Native<ffi.Int Function(MiniAVAudioContextHandle)>(
-    symbol: 'MiniAV_Audio_StopCapture')
-external int _MiniAV_Audio_StopCapture(
-  MiniAVAudioContextHandle context,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Audio_StartCapture(context, callback, user_data),
 );
 
-MiniAVResultCode MiniAV_Audio_StopCapture(
-  MiniAVAudioContextHandle context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Audio_StopCapture(
-      context,
-    ));
+@ffi.Native<ffi.Int Function(MiniAVAudioContextHandle)>(
+  symbol: 'MiniAV_Audio_StopCapture',
+)
+external int _MiniAV_Audio_StopCapture(MiniAVAudioContextHandle context);
+
+MiniAVResultCode MiniAV_Audio_StopCapture(MiniAVAudioContextHandle context) =>
+    MiniAVResultCode.fromValue(_MiniAV_Audio_StopCapture(context));
 
 @ffi.Native<
-    ffi.Int Function(
-        ffi.UnsignedInt,
-        ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_Loopback_EnumerateTargets')
+  ffi.Int Function(
+    ffi.UnsignedInt,
+    ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Loopback_EnumerateTargets')
 external int _MiniAV_Loopback_EnumerateTargets(
   int target_type_filter,
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> targets_out,
@@ -683,18 +663,21 @@ MiniAVResultCode MiniAV_Loopback_EnumerateTargets(
   MiniAVLoopbackTargetType target_type_filter,
   ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> targets_out,
   ffi.Pointer<ffi.Uint32> count_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_EnumerateTargets(
-      target_type_filter.value,
-      targets_out,
-      count_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Loopback_EnumerateTargets(
+    target_type_filter.value,
+    targets_out,
+    count_out,
+  ),
+);
 
 @ffi.Native<
-    ffi.Int Function(
-        ffi.Pointer<ffi.Char>,
-        ffi.Pointer<ffi.Pointer<MiniAVAudioInfo>>,
-        ffi.Pointer<ffi.Uint32>)>(symbol: 'MiniAV_Loopback_GetSupportedFormats')
+  ffi.Int Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Pointer<MiniAVAudioInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Loopback_GetSupportedFormats')
 external int _MiniAV_Loopback_GetSupportedFormats(
   ffi.Pointer<ffi.Char> target_device_id,
   ffi.Pointer<ffi.Pointer<MiniAVAudioInfo>> formats_out,
@@ -705,16 +688,17 @@ MiniAVResultCode MiniAV_Loopback_GetSupportedFormats(
   ffi.Pointer<ffi.Char> target_device_id,
   ffi.Pointer<ffi.Pointer<MiniAVAudioInfo>> formats_out,
   ffi.Pointer<ffi.Uint32> count_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_GetSupportedFormats(
-      target_device_id,
-      formats_out,
-      count_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Loopback_GetSupportedFormats(
+    target_device_id,
+    formats_out,
+    count_out,
+  ),
+);
 
 @ffi.Native<
-        ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<MiniAVAudioInfo>)>(
-    symbol: 'MiniAV_Loopback_GetDefaultFormat')
+  ffi.Int Function(ffi.Pointer<ffi.Char>, ffi.Pointer<MiniAVAudioInfo>)
+>(symbol: 'MiniAV_Loopback_GetDefaultFormat')
 external int _MiniAV_Loopback_GetDefaultFormat(
   ffi.Pointer<ffi.Char> target_device_id,
   ffi.Pointer<MiniAVAudioInfo> format_out,
@@ -723,16 +707,13 @@ external int _MiniAV_Loopback_GetDefaultFormat(
 MiniAVResultCode MiniAV_Loopback_GetDefaultFormat(
   ffi.Pointer<ffi.Char> target_device_id,
   ffi.Pointer<MiniAVAudioInfo> format_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_GetDefaultFormat(
-      target_device_id,
-      format_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Loopback_GetDefaultFormat(target_device_id, format_out),
+);
 
 @ffi.Native<
-        ffi.Int Function(
-            MiniAVLoopbackContextHandle, ffi.Pointer<MiniAVAudioInfo>)>(
-    symbol: 'MiniAV_Loopback_GetConfiguredFormat')
+  ffi.Int Function(MiniAVLoopbackContextHandle, ffi.Pointer<MiniAVAudioInfo>)
+>(symbol: 'MiniAV_Loopback_GetConfiguredFormat')
 external int _MiniAV_Loopback_GetConfiguredFormat(
   MiniAVLoopbackContextHandle context,
   ffi.Pointer<MiniAVAudioInfo> format_out,
@@ -741,41 +722,39 @@ external int _MiniAV_Loopback_GetConfiguredFormat(
 MiniAVResultCode MiniAV_Loopback_GetConfiguredFormat(
   MiniAVLoopbackContextHandle context,
   ffi.Pointer<MiniAVAudioInfo> format_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_GetConfiguredFormat(
-      context,
-      format_out,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Loopback_GetConfiguredFormat(context, format_out),
+);
 
 @ffi.Native<ffi.Int Function(ffi.Pointer<MiniAVLoopbackContextHandle>)>(
-    symbol: 'MiniAV_Loopback_CreateContext')
+  symbol: 'MiniAV_Loopback_CreateContext',
+)
 external int _MiniAV_Loopback_CreateContext(
   ffi.Pointer<MiniAVLoopbackContextHandle> context_out,
 );
 
 MiniAVResultCode MiniAV_Loopback_CreateContext(
   ffi.Pointer<MiniAVLoopbackContextHandle> context_out,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_CreateContext(
-      context_out,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_Loopback_CreateContext(context_out));
 
 @ffi.Native<ffi.Int Function(MiniAVLoopbackContextHandle)>(
-    symbol: 'MiniAV_Loopback_DestroyContext')
+  symbol: 'MiniAV_Loopback_DestroyContext',
+)
 external int _MiniAV_Loopback_DestroyContext(
   MiniAVLoopbackContextHandle context,
 );
 
 MiniAVResultCode MiniAV_Loopback_DestroyContext(
   MiniAVLoopbackContextHandle context,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_DestroyContext(
-      context,
-    ));
+) => MiniAVResultCode.fromValue(_MiniAV_Loopback_DestroyContext(context));
 
 @ffi.Native<
-    ffi.Int Function(MiniAVLoopbackContextHandle, ffi.Pointer<ffi.Char>,
-        ffi.Pointer<MiniAVAudioInfo>)>(symbol: 'MiniAV_Loopback_Configure')
+  ffi.Int Function(
+    MiniAVLoopbackContextHandle,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<MiniAVAudioInfo>,
+  )
+>(symbol: 'MiniAV_Loopback_Configure')
 external int _MiniAV_Loopback_Configure(
   MiniAVLoopbackContextHandle context,
   ffi.Pointer<ffi.Char> target_device_id,
@@ -786,16 +765,17 @@ MiniAVResultCode MiniAV_Loopback_Configure(
   MiniAVLoopbackContextHandle context,
   ffi.Pointer<ffi.Char> target_device_id,
   ffi.Pointer<MiniAVAudioInfo> requested_format,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_Configure(
-      context,
-      target_device_id,
-      requested_format,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Loopback_Configure(context, target_device_id, requested_format),
+);
 
 @ffi.Native<
-    ffi.Int Function(MiniAVLoopbackContextHandle, MiniAVBufferCallback,
-        ffi.Pointer<ffi.Void>)>(symbol: 'MiniAV_Loopback_StartCapture')
+  ffi.Int Function(
+    MiniAVLoopbackContextHandle,
+    MiniAVBufferCallback,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Loopback_StartCapture')
 external int _MiniAV_Loopback_StartCapture(
   MiniAVLoopbackContextHandle context,
   MiniAVBufferCallback callback,
@@ -806,25 +786,312 @@ MiniAVResultCode MiniAV_Loopback_StartCapture(
   MiniAVLoopbackContextHandle context,
   MiniAVBufferCallback callback,
   ffi.Pointer<ffi.Void> user_data,
-) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_StartCapture(
-      context,
-      callback,
-      user_data,
-    ));
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Loopback_StartCapture(context, callback, user_data),
+);
 
 @ffi.Native<ffi.Int Function(MiniAVLoopbackContextHandle)>(
-    symbol: 'MiniAV_Loopback_StopCapture')
-external int _MiniAV_Loopback_StopCapture(
-  MiniAVLoopbackContextHandle context,
-);
+  symbol: 'MiniAV_Loopback_StopCapture',
+)
+external int _MiniAV_Loopback_StopCapture(MiniAVLoopbackContextHandle context);
 
 MiniAVResultCode MiniAV_Loopback_StopCapture(
   MiniAVLoopbackContextHandle context,
+) => MiniAVResultCode.fromValue(_MiniAV_Loopback_StopCapture(context));
+
+@ffi.Native<
+  ffi.Int Function(
+    ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>>,
+    ffi.Pointer<ffi.Uint32>,
+  )
+>(symbol: 'MiniAV_Input_EnumerateGamepads')
+external int _MiniAV_Input_EnumerateGamepads(
+  ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> devices,
+  ffi.Pointer<ffi.Uint32> count,
+);
+
+MiniAVResultCode MiniAV_Input_EnumerateGamepads(
+  ffi.Pointer<ffi.Pointer<MiniAVDeviceInfo>> devices,
+  ffi.Pointer<ffi.Uint32> count,
 ) =>
-    MiniAVResultCode.fromValue(_MiniAV_Loopback_StopCapture(
-      context,
-    ));
+    MiniAVResultCode.fromValue(_MiniAV_Input_EnumerateGamepads(devices, count));
+
+@ffi.Native<ffi.Int Function(ffi.Pointer<MiniAVInputContextHandle>)>(
+  symbol: 'MiniAV_Input_CreateContext',
+)
+external int _MiniAV_Input_CreateContext(
+  ffi.Pointer<MiniAVInputContextHandle> context,
+);
+
+MiniAVResultCode MiniAV_Input_CreateContext(
+  ffi.Pointer<MiniAVInputContextHandle> context,
+) => MiniAVResultCode.fromValue(_MiniAV_Input_CreateContext(context));
+
+@ffi.Native<ffi.Int Function(MiniAVInputContextHandle)>(
+  symbol: 'MiniAV_Input_DestroyContext',
+)
+external int _MiniAV_Input_DestroyContext(MiniAVInputContextHandle context);
+
+MiniAVResultCode MiniAV_Input_DestroyContext(
+  MiniAVInputContextHandle context,
+) => MiniAVResultCode.fromValue(_MiniAV_Input_DestroyContext(context));
+
+@ffi.Native<
+  ffi.Int Function(MiniAVInputContextHandle, ffi.Pointer<MiniAVInputConfig>)
+>(symbol: 'MiniAV_Input_Configure')
+external int _MiniAV_Input_Configure(
+  MiniAVInputContextHandle context,
+  ffi.Pointer<MiniAVInputConfig> config,
+);
+
+MiniAVResultCode MiniAV_Input_Configure(
+  MiniAVInputContextHandle context,
+  ffi.Pointer<MiniAVInputConfig> config,
+) => MiniAVResultCode.fromValue(_MiniAV_Input_Configure(context, config));
+
+@ffi.Native<ffi.Int Function(MiniAVInputContextHandle)>(
+  symbol: 'MiniAV_Input_StartCapture',
+)
+external int _MiniAV_Input_StartCapture(MiniAVInputContextHandle context);
+
+MiniAVResultCode MiniAV_Input_StartCapture(MiniAVInputContextHandle context) =>
+    MiniAVResultCode.fromValue(_MiniAV_Input_StartCapture(context));
+
+@ffi.Native<ffi.Int Function(MiniAVInputContextHandle)>(
+  symbol: 'MiniAV_Input_StopCapture',
+)
+external int _MiniAV_Input_StopCapture(MiniAVInputContextHandle context);
+
+MiniAVResultCode MiniAV_Input_StopCapture(MiniAVInputContextHandle context) =>
+    MiniAVResultCode.fromValue(_MiniAV_Input_StopCapture(context));
+
+// --- Input Injection ---
+@ffi.Native<ffi.Int Function(ffi.Pointer<MiniAVInjectContextHandle>)>(
+  symbol: 'MiniAV_Inject_CreateContext',
+)
+external int _MiniAV_Inject_CreateContext(
+  ffi.Pointer<MiniAVInjectContextHandle> context,
+);
+
+MiniAVResultCode MiniAV_Inject_CreateContext(
+  ffi.Pointer<MiniAVInjectContextHandle> context,
+) => MiniAVResultCode.fromValue(_MiniAV_Inject_CreateContext(context));
+
+@ffi.Native<ffi.Int Function(MiniAVInjectContextHandle)>(
+  symbol: 'MiniAV_Inject_DestroyContext',
+)
+external int _MiniAV_Inject_DestroyContext(MiniAVInjectContextHandle context);
+
+MiniAVResultCode MiniAV_Inject_DestroyContext(
+  MiniAVInjectContextHandle context,
+) => MiniAVResultCode.fromValue(_MiniAV_Inject_DestroyContext(context));
+
+@ffi.Native<ffi.Int Function(MiniAVInjectContextHandle, ffi.Uint32)>(
+  symbol: 'MiniAV_Inject_Configure',
+)
+external int _MiniAV_Inject_Configure(
+  MiniAVInjectContextHandle context,
+  int input_types,
+);
+
+MiniAVResultCode MiniAV_Inject_Configure(
+  MiniAVInjectContextHandle context,
+  int input_types,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Inject_Configure(context, input_types),
+);
+
+@ffi.Native<
+  ffi.Int Function(MiniAVInjectContextHandle, ffi.Pointer<MiniAVKeyboardEvent>)
+>(symbol: 'MiniAV_Inject_Keyboard')
+external int _MiniAV_Inject_Keyboard(
+  MiniAVInjectContextHandle context,
+  ffi.Pointer<MiniAVKeyboardEvent> event,
+);
+
+MiniAVResultCode MiniAV_Inject_Keyboard(
+  MiniAVInjectContextHandle context,
+  ffi.Pointer<MiniAVKeyboardEvent> event,
+) => MiniAVResultCode.fromValue(_MiniAV_Inject_Keyboard(context, event));
+
+@ffi.Native<
+  ffi.Int Function(MiniAVInjectContextHandle, ffi.Pointer<MiniAVMouseEvent>)
+>(symbol: 'MiniAV_Inject_Mouse')
+external int _MiniAV_Inject_Mouse(
+  MiniAVInjectContextHandle context,
+  ffi.Pointer<MiniAVMouseEvent> event,
+);
+
+MiniAVResultCode MiniAV_Inject_Mouse(
+  MiniAVInjectContextHandle context,
+  ffi.Pointer<MiniAVMouseEvent> event,
+) => MiniAVResultCode.fromValue(_MiniAV_Inject_Mouse(context, event));
+
+// --- Device change subscription bindings ---
+
+@ffi.Native<
+  ffi.Int Function(MiniAVDeviceChangeCallback, ffi.Pointer<ffi.Void>)
+>(symbol: 'MiniAV_Camera_SetDeviceChangeCallback')
+external int _MiniAV_Camera_SetDeviceChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Camera_SetDeviceChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Camera_SetDeviceChangeCallback(callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(
+    MiniAVCameraContextHandle,
+    MiniAVContextLostCallback,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Camera_SetContextLostCallback')
+external int _MiniAV_Camera_SetContextLostCallback(
+  MiniAVCameraContextHandle context,
+  MiniAVContextLostCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Camera_SetContextLostCallback(
+  MiniAVCameraContextHandle context,
+  MiniAVContextLostCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Camera_SetContextLostCallback(context, callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(MiniAVDeviceChangeCallback, ffi.Pointer<ffi.Void>)
+>(symbol: 'MiniAV_Audio_SetDeviceChangeCallback')
+external int _MiniAV_Audio_SetDeviceChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Audio_SetDeviceChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Audio_SetDeviceChangeCallback(callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(
+    MiniAVAudioContextHandle,
+    MiniAVContextLostCallback,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Audio_SetContextLostCallback')
+external int _MiniAV_Audio_SetContextLostCallback(
+  MiniAVAudioContextHandle context,
+  MiniAVContextLostCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Audio_SetContextLostCallback(
+  MiniAVAudioContextHandle context,
+  MiniAVContextLostCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Audio_SetContextLostCallback(context, callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(MiniAVDeviceChangeCallback, ffi.Pointer<ffi.Void>)
+>(symbol: 'MiniAV_Loopback_SetDeviceChangeCallback')
+external int _MiniAV_Loopback_SetDeviceChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Loopback_SetDeviceChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Loopback_SetDeviceChangeCallback(callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(
+    MiniAVLoopbackContextHandle,
+    MiniAVContextLostCallback,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Loopback_SetContextLostCallback')
+external int _MiniAV_Loopback_SetContextLostCallback(
+  MiniAVLoopbackContextHandle context,
+  MiniAVContextLostCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Loopback_SetContextLostCallback(
+  MiniAVLoopbackContextHandle context,
+  MiniAVContextLostCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Loopback_SetContextLostCallback(context, callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(MiniAVDeviceChangeCallback, ffi.Pointer<ffi.Void>)
+>(symbol: 'MiniAV_Screen_SetDisplayChangeCallback')
+external int _MiniAV_Screen_SetDisplayChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Screen_SetDisplayChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_SetDisplayChangeCallback(callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(MiniAVDeviceChangeCallback, ffi.Pointer<ffi.Void>)
+>(symbol: 'MiniAV_Screen_SetWindowChangeCallback')
+external int _MiniAV_Screen_SetWindowChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Screen_SetWindowChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_SetWindowChangeCallback(callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(
+    MiniAVScreenContextHandle,
+    MiniAVContextLostCallback,
+    ffi.Pointer<ffi.Void>,
+  )
+>(symbol: 'MiniAV_Screen_SetContextLostCallback')
+external int _MiniAV_Screen_SetContextLostCallback(
+  MiniAVScreenContextHandle context,
+  MiniAVContextLostCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Screen_SetContextLostCallback(
+  MiniAVScreenContextHandle context,
+  MiniAVContextLostCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Screen_SetContextLostCallback(context, callback, user_data),
+);
+
+@ffi.Native<
+  ffi.Int Function(MiniAVDeviceChangeCallback, ffi.Pointer<ffi.Void>)
+>(symbol: 'MiniAV_Input_SetGamepadChangeCallback')
+external int _MiniAV_Input_SetGamepadChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+);
+MiniAVResultCode MiniAV_Input_SetGamepadChangeCallback(
+  MiniAVDeviceChangeCallback callback,
+  ffi.Pointer<ffi.Void> user_data,
+) => MiniAVResultCode.fromValue(
+  _MiniAV_Input_SetGamepadChangeCallback(callback, user_data),
+);
 
 enum MiniAVResultCode {
   MINIAV_SUCCESS(0),
@@ -849,37 +1116,39 @@ enum MiniAVResultCode {
   MINIAV_ERROR_PORTAL_FAILED(-19),
   MINIAV_ERROR_STREAM_FAILED(-20),
   MINIAV_ERROR_PORTAL_CLOSED(-21),
-  MINIAV_ERROR_USER_CANCELLED(-22);
+  MINIAV_ERROR_USER_CANCELLED(-22),
+  MINIAV_ERROR_PERMISSION_DENIED(-23);
 
   final int value;
   const MiniAVResultCode(this.value);
 
   static MiniAVResultCode fromValue(int value) => switch (value) {
-        0 => MINIAV_SUCCESS,
-        -1 => MINIAV_ERROR_UNKNOWN,
-        -2 => MINIAV_ERROR_INVALID_ARG,
-        -3 => MINIAV_ERROR_NOT_INITIALIZED,
-        -4 => MINIAV_ERROR_SYSTEM_CALL_FAILED,
-        -5 => MINIAV_ERROR_NOT_SUPPORTED,
-        -6 => MINIAV_ERROR_BUFFER_TOO_SMALL,
-        -7 => MINIAV_ERROR_INVALID_HANDLE,
-        -8 => MINIAV_ERROR_DEVICE_NOT_FOUND,
-        -9 => MINIAV_ERROR_DEVICE_BUSY,
-        -10 => MINIAV_ERROR_ALREADY_RUNNING,
-        -11 => MINIAV_ERROR_NOT_RUNNING,
-        -12 => MINIAV_ERROR_OUT_OF_MEMORY,
-        -13 => MINIAV_ERROR_TIMEOUT,
-        -14 => MINIAV_ERROR_DEVICE_LOST,
-        -15 => MINIAV_ERROR_FORMAT_NOT_SUPPORTED,
-        -16 => MINIAV_ERROR_INVALID_OPERATION,
-        -17 => MINIAV_ERROR_NOT_IMPLEMENTED,
-        -18 => MINIAV_ERROR_NOT_CONFIGURED,
-        -19 => MINIAV_ERROR_PORTAL_FAILED,
-        -20 => MINIAV_ERROR_STREAM_FAILED,
-        -21 => MINIAV_ERROR_PORTAL_CLOSED,
-        -22 => MINIAV_ERROR_USER_CANCELLED,
-        _ => throw ArgumentError('Unknown value for MiniAVResultCode: $value'),
-      };
+    0 => MINIAV_SUCCESS,
+    -1 => MINIAV_ERROR_UNKNOWN,
+    -2 => MINIAV_ERROR_INVALID_ARG,
+    -3 => MINIAV_ERROR_NOT_INITIALIZED,
+    -4 => MINIAV_ERROR_SYSTEM_CALL_FAILED,
+    -5 => MINIAV_ERROR_NOT_SUPPORTED,
+    -6 => MINIAV_ERROR_BUFFER_TOO_SMALL,
+    -7 => MINIAV_ERROR_INVALID_HANDLE,
+    -8 => MINIAV_ERROR_DEVICE_NOT_FOUND,
+    -9 => MINIAV_ERROR_DEVICE_BUSY,
+    -10 => MINIAV_ERROR_ALREADY_RUNNING,
+    -11 => MINIAV_ERROR_NOT_RUNNING,
+    -12 => MINIAV_ERROR_OUT_OF_MEMORY,
+    -13 => MINIAV_ERROR_TIMEOUT,
+    -14 => MINIAV_ERROR_DEVICE_LOST,
+    -15 => MINIAV_ERROR_FORMAT_NOT_SUPPORTED,
+    -16 => MINIAV_ERROR_INVALID_OPERATION,
+    -17 => MINIAV_ERROR_NOT_IMPLEMENTED,
+    -18 => MINIAV_ERROR_NOT_CONFIGURED,
+    -19 => MINIAV_ERROR_PORTAL_FAILED,
+    -20 => MINIAV_ERROR_STREAM_FAILED,
+    -21 => MINIAV_ERROR_PORTAL_CLOSED,
+    -22 => MINIAV_ERROR_USER_CANCELLED,
+    -23 => MINIAV_ERROR_PERMISSION_DENIED,
+    _ => throw ArgumentError('Unknown value for MiniAVResultCode: $value'),
+  };
 }
 
 final class MiniAVDeviceInfo extends ffi.Struct {
@@ -936,45 +1205,45 @@ enum MiniAVPixelFormat {
   const MiniAVPixelFormat(this.value);
 
   static MiniAVPixelFormat fromValue(int value) => switch (value) {
-        0 => MINIAV_PIXEL_FORMAT_UNKNOWN,
-        1 => MINIAV_PIXEL_FORMAT_RGB24,
-        2 => MINIAV_PIXEL_FORMAT_BGR24,
-        3 => MINIAV_PIXEL_FORMAT_RGBA32,
-        4 => MINIAV_PIXEL_FORMAT_BGRA32,
-        5 => MINIAV_PIXEL_FORMAT_ARGB32,
-        6 => MINIAV_PIXEL_FORMAT_ABGR32,
-        7 => MINIAV_PIXEL_FORMAT_RGBX32,
-        8 => MINIAV_PIXEL_FORMAT_BGRX32,
-        9 => MINIAV_PIXEL_FORMAT_XRGB32,
-        10 => MINIAV_PIXEL_FORMAT_XBGR32,
-        11 => MINIAV_PIXEL_FORMAT_I420,
-        12 => MINIAV_PIXEL_FORMAT_YV12,
-        13 => MINIAV_PIXEL_FORMAT_NV12,
-        14 => MINIAV_PIXEL_FORMAT_NV21,
-        15 => MINIAV_PIXEL_FORMAT_YUY2,
-        16 => MINIAV_PIXEL_FORMAT_UYVY,
-        17 => MINIAV_PIXEL_FORMAT_RGB30,
-        18 => MINIAV_PIXEL_FORMAT_RGB48,
-        19 => MINIAV_PIXEL_FORMAT_RGBA64,
-        20 => MINIAV_PIXEL_FORMAT_RGBA64_HALF,
-        21 => MINIAV_PIXEL_FORMAT_RGBA128_FLOAT,
-        22 => MINIAV_PIXEL_FORMAT_YUV420_10BIT,
-        23 => MINIAV_PIXEL_FORMAT_YUV422_10BIT,
-        24 => MINIAV_PIXEL_FORMAT_YUV444_10BIT,
-        25 => MINIAV_PIXEL_FORMAT_GRAY8,
-        26 => MINIAV_PIXEL_FORMAT_GRAY16,
-        27 => MINIAV_PIXEL_FORMAT_BAYER_GRBG8,
-        28 => MINIAV_PIXEL_FORMAT_BAYER_RGGB8,
-        29 => MINIAV_PIXEL_FORMAT_BAYER_BGGR8,
-        30 => MINIAV_PIXEL_FORMAT_BAYER_GBRG8,
-        31 => MINIAV_PIXEL_FORMAT_BAYER_GRBG16,
-        32 => MINIAV_PIXEL_FORMAT_BAYER_RGGB16,
-        33 => MINIAV_PIXEL_FORMAT_BAYER_BGGR16,
-        34 => MINIAV_PIXEL_FORMAT_BAYER_GBRG16,
-        35 => MINIAV_PIXEL_FORMAT_MJPEG,
-        36 => MINIAV_PIXEL_FORMAT_COUNT,
-        _ => throw ArgumentError('Unknown value for MiniAVPixelFormat: $value'),
-      };
+    0 => MINIAV_PIXEL_FORMAT_UNKNOWN,
+    1 => MINIAV_PIXEL_FORMAT_RGB24,
+    2 => MINIAV_PIXEL_FORMAT_BGR24,
+    3 => MINIAV_PIXEL_FORMAT_RGBA32,
+    4 => MINIAV_PIXEL_FORMAT_BGRA32,
+    5 => MINIAV_PIXEL_FORMAT_ARGB32,
+    6 => MINIAV_PIXEL_FORMAT_ABGR32,
+    7 => MINIAV_PIXEL_FORMAT_RGBX32,
+    8 => MINIAV_PIXEL_FORMAT_BGRX32,
+    9 => MINIAV_PIXEL_FORMAT_XRGB32,
+    10 => MINIAV_PIXEL_FORMAT_XBGR32,
+    11 => MINIAV_PIXEL_FORMAT_I420,
+    12 => MINIAV_PIXEL_FORMAT_YV12,
+    13 => MINIAV_PIXEL_FORMAT_NV12,
+    14 => MINIAV_PIXEL_FORMAT_NV21,
+    15 => MINIAV_PIXEL_FORMAT_YUY2,
+    16 => MINIAV_PIXEL_FORMAT_UYVY,
+    17 => MINIAV_PIXEL_FORMAT_RGB30,
+    18 => MINIAV_PIXEL_FORMAT_RGB48,
+    19 => MINIAV_PIXEL_FORMAT_RGBA64,
+    20 => MINIAV_PIXEL_FORMAT_RGBA64_HALF,
+    21 => MINIAV_PIXEL_FORMAT_RGBA128_FLOAT,
+    22 => MINIAV_PIXEL_FORMAT_YUV420_10BIT,
+    23 => MINIAV_PIXEL_FORMAT_YUV422_10BIT,
+    24 => MINIAV_PIXEL_FORMAT_YUV444_10BIT,
+    25 => MINIAV_PIXEL_FORMAT_GRAY8,
+    26 => MINIAV_PIXEL_FORMAT_GRAY16,
+    27 => MINIAV_PIXEL_FORMAT_BAYER_GRBG8,
+    28 => MINIAV_PIXEL_FORMAT_BAYER_RGGB8,
+    29 => MINIAV_PIXEL_FORMAT_BAYER_BGGR8,
+    30 => MINIAV_PIXEL_FORMAT_BAYER_GBRG8,
+    31 => MINIAV_PIXEL_FORMAT_BAYER_GRBG16,
+    32 => MINIAV_PIXEL_FORMAT_BAYER_RGGB16,
+    33 => MINIAV_PIXEL_FORMAT_BAYER_BGGR16,
+    34 => MINIAV_PIXEL_FORMAT_BAYER_GBRG16,
+    35 => MINIAV_PIXEL_FORMAT_MJPEG,
+    36 => MINIAV_PIXEL_FORMAT_COUNT,
+    _ => throw ArgumentError('Unknown value for MiniAVPixelFormat: $value'),
+  };
 }
 
 enum MiniAVAudioFormat {
@@ -989,14 +1258,14 @@ enum MiniAVAudioFormat {
   const MiniAVAudioFormat(this.value);
 
   static MiniAVAudioFormat fromValue(int value) => switch (value) {
-        0 => MINIAV_AUDIO_FORMAT_UNKNOWN,
-        1 => MINIAV_AUDIO_FORMAT_U8,
-        2 => MINIAV_AUDIO_FORMAT_S16,
-        3 => MINIAV_AUDIO_FORMAT_S32,
-        4 => MINIAV_AUDIO_FORMAT_F32,
-        5 => MINIAV_AUDIO_FORMAT_F64,
-        _ => throw ArgumentError('Unknown value for MiniAVAudioFormat: $value'),
-      };
+    0 => MINIAV_AUDIO_FORMAT_UNKNOWN,
+    1 => MINIAV_AUDIO_FORMAT_U8,
+    2 => MINIAV_AUDIO_FORMAT_S16,
+    3 => MINIAV_AUDIO_FORMAT_S32,
+    4 => MINIAV_AUDIO_FORMAT_F32,
+    5 => MINIAV_AUDIO_FORMAT_F64,
+    _ => throw ArgumentError('Unknown value for MiniAVAudioFormat: $value'),
+  };
 }
 
 enum MiniAVCaptureType {
@@ -1008,11 +1277,11 @@ enum MiniAVCaptureType {
   const MiniAVCaptureType(this.value);
 
   static MiniAVCaptureType fromValue(int value) => switch (value) {
-        0 => MINIAV_CAPTURE_TYPE_DISPLAY,
-        1 => MINIAV_CAPTURE_TYPE_WINDOW,
-        2 => MINIAV_CAPTURE_TYPE_REGION,
-        _ => throw ArgumentError('Unknown value for MiniAVCaptureType: $value'),
-      };
+    0 => MINIAV_CAPTURE_TYPE_DISPLAY,
+    1 => MINIAV_CAPTURE_TYPE_WINDOW,
+    2 => MINIAV_CAPTURE_TYPE_REGION,
+    _ => throw ArgumentError('Unknown value for MiniAVCaptureType: $value'),
+  };
 }
 
 enum MiniAVOutputPreference {
@@ -1023,11 +1292,12 @@ enum MiniAVOutputPreference {
   const MiniAVOutputPreference(this.value);
 
   static MiniAVOutputPreference fromValue(int value) => switch (value) {
-        0 => MINIAV_OUTPUT_PREFERENCE_CPU,
-        1 => MINIAV_OUTPUT_PREFERENCE_GPU,
-        _ => throw ArgumentError(
-            'Unknown value for MiniAVOutputPreference: $value'),
-      };
+    0 => MINIAV_OUTPUT_PREFERENCE_CPU,
+    1 => MINIAV_OUTPUT_PREFERENCE_GPU,
+    _ => throw ArgumentError(
+      'Unknown value for MiniAVOutputPreference: $value',
+    ),
+  };
 }
 
 final class MiniAVVideoInfo extends ffi.Struct {
@@ -1082,13 +1352,14 @@ enum MiniAVLoopbackTargetType {
   const MiniAVLoopbackTargetType(this.value);
 
   static MiniAVLoopbackTargetType fromValue(int value) => switch (value) {
-        0 => MINIAV_LOOPBACK_TARGET_NONE,
-        1 => MINIAV_LOOPBACK_TARGET_SYSTEM_AUDIO,
-        2 => MINIAV_LOOPBACK_TARGET_PROCESS,
-        3 => MINIAV_LOOPBACK_TARGET_WINDOW,
-        _ => throw ArgumentError(
-            'Unknown value for MiniAVLoopbackTargetType: $value'),
-      };
+    0 => MINIAV_LOOPBACK_TARGET_NONE,
+    1 => MINIAV_LOOPBACK_TARGET_SYSTEM_AUDIO,
+    2 => MINIAV_LOOPBACK_TARGET_PROCESS,
+    3 => MINIAV_LOOPBACK_TARGET_WINDOW,
+    _ => throw ArgumentError(
+      'Unknown value for MiniAVLoopbackTargetType: $value',
+    ),
+  };
 }
 
 final class UnnamedUnion1 extends ffi.Union {
@@ -1124,6 +1395,224 @@ final class MiniAVLoopbackContext extends ffi.Opaque {}
 
 typedef MiniAVLoopbackContextHandle = ffi.Pointer<MiniAVLoopbackContext>;
 
+final class MiniAVInputContext extends ffi.Opaque {}
+
+typedef MiniAVInputContextHandle = ffi.Pointer<MiniAVInputContext>;
+
+final class MiniAVInjectContext extends ffi.Opaque {}
+
+typedef MiniAVInjectContextHandle = ffi.Pointer<MiniAVInjectContext>;
+
+enum MiniAVInputType {
+  MINIAV_INPUT_TYPE_KEYBOARD(1),
+  MINIAV_INPUT_TYPE_MOUSE(2),
+  MINIAV_INPUT_TYPE_GAMEPAD(4);
+
+  final int value;
+  const MiniAVInputType(this.value);
+
+  static MiniAVInputType fromValue(int value) => switch (value) {
+    1 => MINIAV_INPUT_TYPE_KEYBOARD,
+    2 => MINIAV_INPUT_TYPE_MOUSE,
+    4 => MINIAV_INPUT_TYPE_GAMEPAD,
+    _ => throw ArgumentError('Unknown value for MiniAVInputType: $value'),
+  };
+}
+
+enum MiniAVKeyAction {
+  MINIAV_KEY_ACTION_DOWN(0),
+  MINIAV_KEY_ACTION_UP(1);
+
+  final int value;
+  const MiniAVKeyAction(this.value);
+
+  static MiniAVKeyAction fromValue(int value) => switch (value) {
+    0 => MINIAV_KEY_ACTION_DOWN,
+    1 => MINIAV_KEY_ACTION_UP,
+    _ => throw ArgumentError('Unknown value for MiniAVKeyAction: $value'),
+  };
+}
+
+enum MiniAVMouseAction {
+  MINIAV_MOUSE_ACTION_MOVE(0),
+  MINIAV_MOUSE_ACTION_BUTTON_DOWN(1),
+  MINIAV_MOUSE_ACTION_BUTTON_UP(2),
+  MINIAV_MOUSE_ACTION_WHEEL(3);
+
+  final int value;
+  const MiniAVMouseAction(this.value);
+
+  static MiniAVMouseAction fromValue(int value) => switch (value) {
+    0 => MINIAV_MOUSE_ACTION_MOVE,
+    1 => MINIAV_MOUSE_ACTION_BUTTON_DOWN,
+    2 => MINIAV_MOUSE_ACTION_BUTTON_UP,
+    3 => MINIAV_MOUSE_ACTION_WHEEL,
+    _ => throw ArgumentError('Unknown value for MiniAVMouseAction: $value'),
+  };
+}
+
+enum MiniAVMouseButton {
+  MINIAV_MOUSE_BUTTON_NONE(0),
+  MINIAV_MOUSE_BUTTON_LEFT(1),
+  MINIAV_MOUSE_BUTTON_RIGHT(2),
+  MINIAV_MOUSE_BUTTON_MIDDLE(3),
+  MINIAV_MOUSE_BUTTON_X1(4),
+  MINIAV_MOUSE_BUTTON_X2(5);
+
+  final int value;
+  const MiniAVMouseButton(this.value);
+
+  static MiniAVMouseButton fromValue(int value) => switch (value) {
+    0 => MINIAV_MOUSE_BUTTON_NONE,
+    1 => MINIAV_MOUSE_BUTTON_LEFT,
+    2 => MINIAV_MOUSE_BUTTON_RIGHT,
+    3 => MINIAV_MOUSE_BUTTON_MIDDLE,
+    4 => MINIAV_MOUSE_BUTTON_X1,
+    5 => MINIAV_MOUSE_BUTTON_X2,
+    _ => throw ArgumentError('Unknown value for MiniAVMouseButton: $value'),
+  };
+}
+
+final class MiniAVKeyboardEvent extends ffi.Struct {
+  @ffi.Uint64()
+  external int timestamp_us;
+
+  @ffi.Uint32()
+  external int key_code;
+
+  @ffi.Uint32()
+  external int scan_code;
+
+  @ffi.UnsignedInt()
+  external int actionAsInt;
+
+  MiniAVKeyAction get action => MiniAVKeyAction.fromValue(actionAsInt);
+}
+
+final class MiniAVMouseEvent extends ffi.Struct {
+  @ffi.Uint64()
+  external int timestamp_us;
+
+  @ffi.Int32()
+  external int x;
+
+  @ffi.Int32()
+  external int y;
+
+  @ffi.Int32()
+  external int delta_x;
+
+  @ffi.Int32()
+  external int delta_y;
+
+  @ffi.Int32()
+  external int wheel_delta;
+
+  @ffi.Int32()
+  external int wheel_delta_x;
+
+  @ffi.UnsignedInt()
+  external int actionAsInt;
+
+  MiniAVMouseAction get action => MiniAVMouseAction.fromValue(actionAsInt);
+
+  @ffi.UnsignedInt()
+  external int buttonAsInt;
+
+  MiniAVMouseButton get button => MiniAVMouseButton.fromValue(buttonAsInt);
+
+  @ffi.Bool()
+  external bool is_absolute;
+}
+
+final class MiniAVGamepadEvent extends ffi.Struct {
+  @ffi.Uint64()
+  external int timestamp_us;
+
+  @ffi.Uint32()
+  external int gamepad_index;
+
+  @ffi.Uint16()
+  external int buttons;
+
+  @ffi.Int16()
+  external int left_stick_x;
+
+  @ffi.Int16()
+  external int left_stick_y;
+
+  @ffi.Int16()
+  external int right_stick_x;
+
+  @ffi.Int16()
+  external int right_stick_y;
+
+  @ffi.Uint8()
+  external int left_trigger;
+
+  @ffi.Uint8()
+  external int right_trigger;
+
+  @ffi.Bool()
+  external bool connected;
+}
+
+typedef MiniAVKeyboardCallbackFunction =
+    ffi.Void Function(
+      ffi.Pointer<MiniAVKeyboardEvent> event,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef DartMiniAVKeyboardCallbackFunction =
+    void Function(
+      ffi.Pointer<MiniAVKeyboardEvent> event,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef MiniAVKeyboardCallback =
+    ffi.Pointer<ffi.NativeFunction<MiniAVKeyboardCallbackFunction>>;
+typedef MiniAVMouseCallbackFunction =
+    ffi.Void Function(
+      ffi.Pointer<MiniAVMouseEvent> event,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef DartMiniAVMouseCallbackFunction =
+    void Function(
+      ffi.Pointer<MiniAVMouseEvent> event,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef MiniAVMouseCallback =
+    ffi.Pointer<ffi.NativeFunction<MiniAVMouseCallbackFunction>>;
+typedef MiniAVGamepadCallbackFunction =
+    ffi.Void Function(
+      ffi.Pointer<MiniAVGamepadEvent> event,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef DartMiniAVGamepadCallbackFunction =
+    void Function(
+      ffi.Pointer<MiniAVGamepadEvent> event,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef MiniAVGamepadCallback =
+    ffi.Pointer<ffi.NativeFunction<MiniAVGamepadCallbackFunction>>;
+
+final class MiniAVInputConfig extends ffi.Struct {
+  @ffi.Uint32()
+  external int input_types;
+
+  @ffi.Uint32()
+  external int mouse_throttle_hz;
+
+  @ffi.Uint32()
+  external int gamepad_poll_hz;
+
+  external MiniAVKeyboardCallback keyboard_callback;
+
+  external MiniAVMouseCallback mouse_callback;
+
+  external MiniAVGamepadCallback gamepad_callback;
+
+  external ffi.Pointer<ffi.Void> user_data;
+}
+
 enum MiniAVLogLevel {
   MINIAV_LOG_LEVEL_TRACE(0),
   MINIAV_LOG_LEVEL_DEBUG(1),
@@ -1136,22 +1625,30 @@ enum MiniAVLogLevel {
   const MiniAVLogLevel(this.value);
 
   static MiniAVLogLevel fromValue(int value) => switch (value) {
-        0 => MINIAV_LOG_LEVEL_TRACE,
-        1 => MINIAV_LOG_LEVEL_DEBUG,
-        2 => MINIAV_LOG_LEVEL_INFO,
-        3 => MINIAV_LOG_LEVEL_WARN,
-        4 => MINIAV_LOG_LEVEL_ERROR,
-        5 => MINIAV_LOG_LEVEL_NONE,
-        _ => throw ArgumentError('Unknown value for MiniAVLogLevel: $value'),
-      };
+    0 => MINIAV_LOG_LEVEL_TRACE,
+    1 => MINIAV_LOG_LEVEL_DEBUG,
+    2 => MINIAV_LOG_LEVEL_INFO,
+    3 => MINIAV_LOG_LEVEL_WARN,
+    4 => MINIAV_LOG_LEVEL_ERROR,
+    5 => MINIAV_LOG_LEVEL_NONE,
+    _ => throw ArgumentError('Unknown value for MiniAVLogLevel: $value'),
+  };
 }
 
-typedef MiniAVLogCallbackFunction = ffi.Void Function(ffi.UnsignedInt level,
-    ffi.Pointer<ffi.Char> message, ffi.Pointer<ffi.Void> user_data);
-typedef DartMiniAVLogCallbackFunction = void Function(MiniAVLogLevel level,
-    ffi.Pointer<ffi.Char> message, ffi.Pointer<ffi.Void> user_data);
-typedef MiniAVLogCallback
-    = ffi.Pointer<ffi.NativeFunction<MiniAVLogCallbackFunction>>;
+typedef MiniAVLogCallbackFunction =
+    ffi.Void Function(
+      ffi.UnsignedInt level,
+      ffi.Pointer<ffi.Char> message,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef DartMiniAVLogCallbackFunction =
+    void Function(
+      MiniAVLogLevel level,
+      ffi.Pointer<ffi.Char> message,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef MiniAVLogCallback =
+    ffi.Pointer<ffi.NativeFunction<MiniAVLogCallbackFunction>>;
 
 enum MiniAVBufferType {
   MINIAV_BUFFER_TYPE_UNKNOWN(0),
@@ -1162,11 +1659,11 @@ enum MiniAVBufferType {
   const MiniAVBufferType(this.value);
 
   static MiniAVBufferType fromValue(int value) => switch (value) {
-        0 => MINIAV_BUFFER_TYPE_UNKNOWN,
-        1 => MINIAV_BUFFER_TYPE_VIDEO,
-        2 => MINIAV_BUFFER_TYPE_AUDIO,
-        _ => throw ArgumentError('Unknown value for MiniAVBufferType: $value'),
-      };
+    0 => MINIAV_BUFFER_TYPE_UNKNOWN,
+    1 => MINIAV_BUFFER_TYPE_VIDEO,
+    2 => MINIAV_BUFFER_TYPE_AUDIO,
+    _ => throw ArgumentError('Unknown value for MiniAVBufferType: $value'),
+  };
 }
 
 enum MiniAVNativeHandleType {
@@ -1179,32 +1676,36 @@ enum MiniAVNativeHandleType {
   const MiniAVNativeHandleType(this.value);
 
   static MiniAVNativeHandleType fromValue(int value) => switch (value) {
-        0 => MINIAV_NATIVE_HANDLE_TYPE_UNKNOWN,
-        1 => MINIAV_NATIVE_HANDLE_TYPE_VIDEO_CAMERA,
-        2 => MINIAV_NATIVE_HANDLE_TYPE_VIDEO_SCREEN,
-        3 => MINIAV_NATIVE_HANDLE_TYPE_AUDIO,
-        _ => throw ArgumentError(
-            'Unknown value for MiniAVNativeHandleType: $value'),
-      };
+    0 => MINIAV_NATIVE_HANDLE_TYPE_UNKNOWN,
+    1 => MINIAV_NATIVE_HANDLE_TYPE_VIDEO_CAMERA,
+    2 => MINIAV_NATIVE_HANDLE_TYPE_VIDEO_SCREEN,
+    3 => MINIAV_NATIVE_HANDLE_TYPE_AUDIO,
+    _ => throw ArgumentError(
+      'Unknown value for MiniAVNativeHandleType: $value',
+    ),
+  };
 }
 
 enum MiniAVBufferContentType {
   MINIAV_BUFFER_CONTENT_TYPE_CPU(0),
   MINIAV_BUFFER_CONTENT_TYPE_GPU_D3D11_HANDLE(1),
   MINIAV_BUFFER_CONTENT_TYPE_GPU_METAL_TEXTURE(2),
-  MINIAV_BUFFER_CONTENT_TYPE_GPU_DMABUF_FD(3);
+  MINIAV_BUFFER_CONTENT_TYPE_GPU_DMABUF_FD(3),
+  MINIAV_BUFFER_CONTENT_TYPE_GPU_AHARDWAREBUFFER(4);
 
   final int value;
   const MiniAVBufferContentType(this.value);
 
   static MiniAVBufferContentType fromValue(int value) => switch (value) {
-        0 => MINIAV_BUFFER_CONTENT_TYPE_CPU,
-        1 => MINIAV_BUFFER_CONTENT_TYPE_GPU_D3D11_HANDLE,
-        2 => MINIAV_BUFFER_CONTENT_TYPE_GPU_METAL_TEXTURE,
-        3 => MINIAV_BUFFER_CONTENT_TYPE_GPU_DMABUF_FD,
-        _ => throw ArgumentError(
-            'Unknown value for MiniAVBufferContentType: $value'),
-      };
+    0 => MINIAV_BUFFER_CONTENT_TYPE_CPU,
+    1 => MINIAV_BUFFER_CONTENT_TYPE_GPU_D3D11_HANDLE,
+    2 => MINIAV_BUFFER_CONTENT_TYPE_GPU_METAL_TEXTURE,
+    3 => MINIAV_BUFFER_CONTENT_TYPE_GPU_DMABUF_FD,
+    4 => MINIAV_BUFFER_CONTENT_TYPE_GPU_AHARDWAREBUFFER,
+    _ => throw ArgumentError(
+      'Unknown value for MiniAVBufferContentType: $value',
+    ),
+  };
 }
 
 final class MiniAVVideoPlane extends ffi.Struct {
@@ -1224,6 +1725,12 @@ final class MiniAVVideoPlane extends ffi.Struct {
 
   @ffi.Uint32()
   external int subresource_index;
+
+  @ffi.Int32()
+  external int dmabuf_fd;
+
+  @ffi.Uint64()
+  external int drm_format_modifier;
 }
 
 final class UnnamedStruct1 extends ffi.Struct {
@@ -1274,6 +1781,24 @@ final class MiniAVBuffer extends ffi.Struct {
   external ffi.Pointer<ffi.Void> user_data;
 
   external ffi.Pointer<ffi.Void> internal_handle;
+
+  external _MiniAVNativeFence native_fence;
+}
+
+final class _MiniAVNativeFence extends ffi.Struct {
+  @ffi.Int32()
+  external int sync_fd;
+
+  @ffi.Uint32()
+  // ignore: unused_field
+  external int pad0;
+
+  external ffi.Pointer<ffi.Void> d3d11_fence;
+
+  external ffi.Pointer<ffi.Void> metal_shared_event;
+
+  @ffi.Uint64()
+  external int metal_fence_value;
 }
 
 final class MiniAVNativeBufferInternalPayload extends ffi.Struct {
@@ -1296,12 +1821,65 @@ final class MiniAVNativeBufferInternalPayload extends ffi.Struct {
   external ffi.Pointer<MiniAVBuffer> parent_miniav_buffer_ptr;
 }
 
-typedef MiniAVBufferCallbackFunction = ffi.Void Function(
-    ffi.Pointer<MiniAVBuffer> buffer, ffi.Pointer<ffi.Void> user_data);
-typedef DartMiniAVBufferCallbackFunction = void Function(
-    ffi.Pointer<MiniAVBuffer> buffer, ffi.Pointer<ffi.Void> user_data);
-typedef MiniAVBufferCallback
-    = ffi.Pointer<ffi.NativeFunction<MiniAVBufferCallbackFunction>>;
+typedef MiniAVBufferCallbackFunction =
+    ffi.Void Function(
+      ffi.Pointer<MiniAVBuffer> buffer,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef DartMiniAVBufferCallbackFunction =
+    void Function(
+      ffi.Pointer<MiniAVBuffer> buffer,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef MiniAVBufferCallback =
+    ffi.Pointer<ffi.NativeFunction<MiniAVBufferCallbackFunction>>;
+
+// --- Device change / context lost callback typedefs ---
+
+/// Mirrors the C `MiniAVDeviceChangeEvent` enum.
+enum MiniAVDeviceChangeEvent {
+  added(0),
+  removed(1),
+  defaultChanged(2);
+
+  final int value;
+  const MiniAVDeviceChangeEvent(this.value);
+
+  static MiniAVDeviceChangeEvent fromValue(int v) {
+    switch (v) {
+      case 0:
+        return MiniAVDeviceChangeEvent.added;
+      case 1:
+        return MiniAVDeviceChangeEvent.removed;
+      case 2:
+        return MiniAVDeviceChangeEvent.defaultChanged;
+      default:
+        throw ArgumentError('Unknown MiniAVDeviceChangeEvent value: $v');
+    }
+  }
+}
+
+typedef MiniAVDeviceChangeCallbackFunction =
+    ffi.Void Function(
+      ffi.Int32 event,
+      ffi.Pointer<MiniAVDeviceInfo> device,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef DartMiniAVDeviceChangeCallbackFunction =
+    void Function(
+      int event,
+      ffi.Pointer<MiniAVDeviceInfo> device,
+      ffi.Pointer<ffi.Void> user_data,
+    );
+typedef MiniAVDeviceChangeCallback =
+    ffi.Pointer<ffi.NativeFunction<MiniAVDeviceChangeCallbackFunction>>;
+
+typedef MiniAVContextLostCallbackFunction =
+    ffi.Void Function(ffi.Int reason, ffi.Pointer<ffi.Void> user_data);
+typedef DartMiniAVContextLostCallbackFunction =
+    void Function(int reason, ffi.Pointer<ffi.Void> user_data);
+typedef MiniAVContextLostCallback =
+    ffi.Pointer<ffi.NativeFunction<MiniAVContextLostCallbackFunction>>;
 
 const int MINIAV_DEVICE_ID_MAX_LEN = 256;
 

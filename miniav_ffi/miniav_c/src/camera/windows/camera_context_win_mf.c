@@ -2,6 +2,7 @@
 #include "camera_context_win_mf.h"
 #include "../../../include/miniav_buffer.h" // Assumed to be updated for shared handles
 #include "../../common/miniav_logging.h"
+#include "../../common/miniav_time.h"
 #include "../../common/miniav_utils.h"
 
 #include <mfapi.h>
@@ -102,7 +103,22 @@ typedef struct MFPlatformContext {
   ID3D11DeviceContext *d3d_device_context; // Immediate context
   UINT dxgi_manager_reset_token;
 
+  // Rebases MF's 100 ns REFERENCE_TIME sample clock onto the shared
+  // miniav_get_time_us() epoch (reset at start_capture).
+  MiniAVTimebase timebase;
+
+  // Watchdog: consecutive OnReadSample failures with no delivered frame in
+  // between. A device-lost HRESULT NOT on the fixed terminal allow-list used
+  // to let the re-arm loop spin forever without ever firing lost_cb; after
+  // this many consecutive failures we escalate to device-lost. Reset to 0 on
+  // any successfully delivered sample and at start_capture.
+  int consecutive_read_failures;
+
 } MFPlatformContext;
+
+// Consecutive non-terminal OnReadSample failures before we treat the stream
+// as lost (covers device-lost HRESULTs outside the fixed terminal set).
+#define MF_MAX_CONSECUTIVE_READ_FAILURES 30
 
 typedef struct MFFrameReleasePayload {
   IMFSample *sample; // Always present
@@ -171,6 +187,10 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
   DWORD max_length = 0;
   DWORD current_length = 0;
   BOOL processed_as_gpu_texture = FALSE;
+  // When the GPU path had to copy into a new shareable texture, this carries
+  // that texture's CreateTexture2D reference to the frame payload so
+  // mf_release_buffer can release it (it used to leak, one texture per frame).
+  ID3D11Texture2D *gpu_texture_for_payload = NULL;
 
   EnterCriticalSection(&mf_ctx->critical_section);
 
@@ -215,7 +235,15 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
   }
 
   buffer_ptr->type = MINIAV_BUFFER_TYPE_VIDEO;
-  buffer_ptr->timestamp_us = llTimestamp;
+  // llTimestamp is a Media Foundation REFERENCE_TIME: 100 ns units on MF's own
+  // clock/epoch. Convert to µs and rebase onto the shared
+  // miniav_get_time_us() timeline so camera timestamps are comparable with
+  // every other track (screen QPC, WASAPI capture positions). Samples without
+  // a timestamp fall back to arrival time without touching the calibration.
+  buffer_ptr->timestamp_us =
+      llTimestamp > 0
+          ? miniav_rebase_time_us(&mf_ctx->timebase, (uint64_t)llTimestamp / 10)
+          : miniav_get_time_us();
   buffer_ptr->data.video.info.width = parent_ctx->configured_video_format.width;
   buffer_ptr->data.video.info.height =
       parent_ctx->configured_video_format.height;
@@ -273,6 +301,12 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
                   mf_ctx->d3d_device_context,
                   (ID3D11Resource *)shareable_texture,
                   (ID3D11Resource *)d3d11_texture);
+              // Commit the copy before the shared handle is exposed to a
+              // consumer on another device — without this the consumer can
+              // open the handle and read the texture before the copy has
+              // executed (the same producer-side race the screen-capture
+              // path guards with its pre-share fence).
+              ID3D11DeviceContext_Flush(mf_ctx->d3d_device_context);
               texture_to_share = shareable_texture;
               texture_needs_release = true;
               miniav_log(MINIAV_LOG_LEVEL_DEBUG,
@@ -316,10 +350,13 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
 
                 processed_as_gpu_texture = TRUE;
 
-                // Store texture reference for cleanup (with proper reference)
                 if (texture_needs_release) {
-                  ID3D11Texture2D_AddRef(
-                      texture_to_share); // AddRef for payload
+                  // Transfer the copy's CreateTexture2D reference to the
+                  // frame payload; mf_release_buffer releases it once the
+                  // consumer is done (it used to be AddRef'd here and never
+                  // stored — a leaked texture per GPU frame).
+                  gpu_texture_for_payload = texture_to_share;
+                  texture_needs_release = false;
                 }
               } else {
                 miniav_log(MINIAV_LOG_LEVEL_ERROR,
@@ -336,6 +373,12 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
             }
           }
 
+          if (texture_needs_release) {
+            // The shareable copy was created but sharing failed — drop its
+            // CreateTexture2D reference before falling back to CPU (this
+            // failure path used to leak the copy too).
+            ID3D11Texture2D_Release(texture_to_share);
+          }
           ID3D11Texture2D_Release(d3d11_texture);
         } else {
           miniav_log(MINIAV_LOG_LEVEL_WARN,
@@ -545,6 +588,10 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
     if (processed_as_gpu_texture && buffer_ptr->data.video.planes[0].data_ptr) {
       CloseHandle((HANDLE)buffer_ptr->data.video.planes[0].data_ptr);
     }
+    if (gpu_texture_for_payload) {
+      ID3D11Texture2D_Release(gpu_texture_for_payload);
+      gpu_texture_for_payload = NULL;
+    }
     if (media_buffer && raw_buffer_data) {
       IMFMediaBuffer_Unlock(media_buffer);
       IMFMediaBuffer_Release(media_buffer);
@@ -557,12 +604,20 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
   // Fill in the payload
   frame_payload->sample = pSample;
   IMFSample_AddRef(pSample); // AddRef for payload
-  frame_payload->original_output_preference = desired_output_pref;
+  // Record the path ACTUALLY taken (not the requested preference):
+  // mf_release_buffer branches on this to interpret the cpu/gpu union, and a
+  // GPU preference can fall back to the CPU path mid-stream — cleaning the
+  // union up as GPU in that case would misread CPU pointers as COM objects.
+  frame_payload->original_output_preference = processed_as_gpu_texture
+                                                  ? MINIAV_OUTPUT_PREFERENCE_GPU
+                                                  : MINIAV_OUTPUT_PREFERENCE_CPU;
 
   if (processed_as_gpu_texture) {
     frame_payload->gpu.shared_texture_handle =
         (HANDLE)buffer_ptr->data.video.planes[0].data_ptr;
-    frame_payload->gpu.gpu_texture_ptr = NULL; // Could store texture if needed
+    // Owns the shareable-copy texture (NULL when the source texture was
+    // already shareable); released in mf_release_buffer.
+    frame_payload->gpu.gpu_texture_ptr = (IUnknown *)gpu_texture_for_payload;
   } else {
     frame_payload->cpu.media_buffer = media_buffer; // Transfer ownership
     frame_payload->cpu.mapped_cpu_ptr = raw_buffer_data;
@@ -577,10 +632,18 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
     miniav_log(MINIAV_LOG_LEVEL_ERROR,
                "MF: Failed to allocate internal handle payload.");
 
-    if (processed_as_gpu_texture && frame_payload->gpu.shared_texture_handle) {
-      CloseHandle(frame_payload->gpu.shared_texture_handle);
-    }
-    if (frame_payload->cpu.media_buffer && frame_payload->cpu.mapped_cpu_ptr) {
+    // NOTE: cpu/gpu are a union — branch on the path taken; reading the CPU
+    // view of a GPU payload would misinterpret the texture pointer as an
+    // IMFMediaBuffer.
+    if (processed_as_gpu_texture) {
+      if (frame_payload->gpu.shared_texture_handle) {
+        CloseHandle(frame_payload->gpu.shared_texture_handle);
+      }
+      if (frame_payload->gpu.gpu_texture_ptr) {
+        IUnknown_Release(frame_payload->gpu.gpu_texture_ptr);
+      }
+    } else if (frame_payload->cpu.media_buffer &&
+               frame_payload->cpu.mapped_cpu_ptr) {
       IMFMediaBuffer_Unlock(frame_payload->cpu.media_buffer);
       IMFMediaBuffer_Release(frame_payload->cpu.media_buffer);
     }
@@ -601,15 +664,24 @@ static HRESULT STDMETHODCALLTYPE MFPlatform_OnReadSample(
 
   buffer_ptr->internal_handle = payload;
 
+  // A frame was successfully built — reset the failure watchdog.
+  mf_ctx->consecutive_read_failures = 0;
+
   if (mf_ctx->app_callback_internal) {
-    mf_ctx->app_callback_internal(buffer_ptr,
-                                  mf_ctx->app_callback_user_data_internal);
+    MINIAV_SAFE_DISPATCH(mf_ctx->app_callback_internal(
+        buffer_ptr, mf_ctx->app_callback_user_data_internal));
   } else {
-    // No app callback, release resources
-    if (processed_as_gpu_texture && frame_payload->gpu.shared_texture_handle) {
-      CloseHandle(frame_payload->gpu.shared_texture_handle);
-    }
-    if (frame_payload->cpu.media_buffer && frame_payload->cpu.mapped_cpu_ptr) {
+    // No app callback, release resources. (cpu/gpu are a union — branch on
+    // the path taken.)
+    if (processed_as_gpu_texture) {
+      if (frame_payload->gpu.shared_texture_handle) {
+        CloseHandle(frame_payload->gpu.shared_texture_handle);
+      }
+      if (frame_payload->gpu.gpu_texture_ptr) {
+        IUnknown_Release(frame_payload->gpu.gpu_texture_ptr);
+      }
+    } else if (frame_payload->cpu.media_buffer &&
+               frame_payload->cpu.mapped_cpu_ptr) {
       IMFMediaBuffer_Unlock(frame_payload->cpu.media_buffer);
       IMFMediaBuffer_Release(frame_payload->cpu.media_buffer);
     }
@@ -629,14 +701,69 @@ request_next_sample:
           NULL, NULL, NULL, NULL);
       if (FAILED(hr_read)) {
         miniav_log(MINIAV_LOG_LEVEL_ERROR,
-                   "MF: Failed to request next sample: 0x%X", hr_read);
+                   "MF: Failed to request next sample: 0x%X. Treating as "
+                   "device lost.",
+                   hr_read);
         mf_ctx->is_streaming = FALSE;
+        parent_ctx->is_running = 0;
+        if (parent_ctx->lost_cb) {
+          parent_ctx->lost_cb((int)MINIAV_ERROR_DEVICE_LOST,
+                              parent_ctx->lost_cb_user_data);
+        }
       }
     } else {
+      // hrStatus / processing failed. Decide if this was a terminal
+      // device-loss type failure (camera unplugged, preempted, etc.) and if
+      // so, stop streaming and notify the application instead of silently
+      // dropping into a no-callback state.
+      BOOL terminal = (hr == E_FAIL ||
+                       hr == MF_E_HW_MFT_FAILED_START_STREAMING ||
+                       hr == MF_E_INVALIDREQUEST ||
+                       hr == HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED) ||
+                       hr == HRESULT_FROM_WIN32(ERROR_DEVICE_REMOVED));
+      // Watchdog: even a non-terminal HRESULT is treated as terminal once it
+      // has recurred with no delivered frame in between — this catches
+      // device-lost codes outside the fixed allow-list that would otherwise
+      // spin the re-arm loop forever.
+      if (!terminal &&
+          ++mf_ctx->consecutive_read_failures >=
+              MF_MAX_CONSECUTIVE_READ_FAILURES) {
+        terminal = TRUE;
+        miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                   "MF: %d consecutive read failures with no frame — "
+                   "escalating to device lost.",
+                   mf_ctx->consecutive_read_failures);
+      }
       miniav_log(MINIAV_LOG_LEVEL_ERROR,
-                 "MF: Not requesting next sample due to error in current "
-                 "sample processing: 0x%X",
-                 hr);
+                 "MF: Not requesting next sample due to error 0x%X "
+                 "(terminal=%d, consecutive=%d).",
+                 hr, (int)terminal, mf_ctx->consecutive_read_failures);
+      if (terminal) {
+        mf_ctx->is_streaming = FALSE;
+        parent_ctx->is_running = 0;
+        if (parent_ctx->lost_cb) {
+          parent_ctx->lost_cb((int)MINIAV_ERROR_DEVICE_LOST,
+                              parent_ctx->lost_cb_user_data);
+        }
+      } else {
+        // Non-terminal: try to keep the stream alive by re-arming.
+        HRESULT hr_read = IMFSourceReader_ReadSample(
+            mf_ctx->source_reader,
+            (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM, 0, NULL, NULL, NULL,
+            NULL);
+        if (FAILED(hr_read)) {
+          miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                     "MF: Re-arm after non-terminal error failed: 0x%X. "
+                     "Treating as device lost.",
+                     hr_read);
+          mf_ctx->is_streaming = FALSE;
+          parent_ctx->is_running = 0;
+          if (parent_ctx->lost_cb) {
+            parent_ctx->lost_cb((int)MINIAV_ERROR_DEVICE_LOST,
+                                parent_ctx->lost_cb_user_data);
+          }
+        }
+      }
     }
   }
 
@@ -1360,6 +1487,11 @@ static MiniAVResultCode mf_configure(
   HRESULT hr_loop_check;
   HRESULT hr_attr;
 
+  // Reconfiguration recreates the source reader/device, which can reset MF's
+  // sample-clock epoch — recalibrate the timestamp rebase (start_capture
+  // resets it too; this covers reconfigure-while-prepared paths).
+  memset(&mf_ctx->timebase, 0, sizeof(mf_ctx->timebase));
+
   IMFActivate *device_activate =
       NULL; // This will be the specific device to configure
   IMFMediaSource *media_source = NULL;
@@ -1693,9 +1825,13 @@ static MiniAVResultCode mf_configure(
     if (mt_width != 0 && mt_height != 0 && mt_fr_den != 0) {
       MiniAVPixelFormat mt_pixel_format =
           MfSubTypeToMiniAVPixelFormat(&subtype_guid);
+      // Frame rate compares as a RATIONAL (cross-multiplied) so equivalent
+      // expressions match — the old exact num+den compare rejected e.g. a
+      // device's 30000/1001 against a requested 2997/100.
       if (mt_width == format->width && mt_height == format->height &&
-          mt_fr_num == format->frame_rate_numerator &&
-          mt_fr_den == format->frame_rate_denominator &&
+          format->frame_rate_denominator != 0 &&
+          (uint64_t)mt_fr_num * format->frame_rate_denominator ==
+              (uint64_t)format->frame_rate_numerator * mt_fr_den &&
           mt_pixel_format == format->pixel_format) {
 
         hr = IMFSourceReader_SetCurrentMediaType(
@@ -1737,11 +1873,46 @@ static MiniAVResultCode mf_configure(
     goto error_cleanup;
   }
 
-  // Configuration successful
+  // Configuration successful — read back the media type the reader actually
+  // COMMITTED (drivers may adjust attributes) instead of echoing the request,
+  // so delivered frames and GetConfiguredFormats report reality (this is the
+  // pattern the macOS backend already follows).
+  MiniAVVideoInfo committed_format = *format;
+  {
+    IMFMediaType *current_type = NULL;
+    if (SUCCEEDED(IMFSourceReader_GetCurrentMediaType(
+            mf_ctx->source_reader, (DWORD)MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            &current_type)) &&
+        current_type) {
+      UINT64 committed_packed = 0;
+      GUID committed_subtype;
+      if (SUCCEEDED(IMFMediaType_GetUINT64(current_type, &MF_MT_FRAME_SIZE,
+                                           &committed_packed))) {
+        committed_format.width = (UINT32)(committed_packed >> 32);
+        committed_format.height = (UINT32)(committed_packed & 0xFFFFFFFF);
+      }
+      if (SUCCEEDED(IMFMediaType_GetUINT64(current_type, &MF_MT_FRAME_RATE,
+                                           &committed_packed))) {
+        committed_format.frame_rate_numerator =
+            (UINT32)(committed_packed >> 32);
+        committed_format.frame_rate_denominator =
+            (UINT32)(committed_packed & 0xFFFFFFFF);
+      }
+      if (SUCCEEDED(IMFMediaType_GetGUID(current_type, &MF_MT_SUBTYPE,
+                                         &committed_subtype))) {
+        MiniAVPixelFormat committed_pf =
+            MfSubTypeToMiniAVPixelFormat(&committed_subtype);
+        if (committed_pf != MINIAV_PIXEL_FORMAT_UNKNOWN) {
+          committed_format.pixel_format = committed_pf;
+        }
+      }
+      IMFMediaType_Release(current_type);
+    }
+  }
   mf_ctx->app_callback_internal = ctx->app_callback;
   mf_ctx->app_callback_user_data_internal = ctx->app_callback_user_data;
-  ctx->configured_video_format = *format;
-  mf_ctx->parent_ctx->configured_video_format = *format;
+  ctx->configured_video_format = committed_format;
+  mf_ctx->parent_ctx->configured_video_format = committed_format;
   miniav_log(MINIAV_LOG_LEVEL_DEBUG,
              "MF: mf_configure - ctx->configured_video_format.pixel_format set "
              "to %d (0x%X)",
@@ -1885,14 +2056,18 @@ static MiniAVResultCode mf_release_buffer(MiniAVCameraContext *ctx,
           }
         } else if (frame_payload->original_output_preference ==
                    MINIAV_OUTPUT_PREFERENCE_GPU) {
-          // GPU path cleanup
+          // GPU path cleanup.
+          // OWNERSHIP: miniav closes the shared NT handle here. The app must
+          // finish importing it (OpenSharedResource1 / minigpu
+          // mgpuImportVideoFrame) BEFORE calling MiniAV_ReleaseBuffer, and
+          // must NOT close it itself. Leaving the close to the app leaked one
+          // kernel handle per captured GPU frame.
           if (frame_payload->gpu.shared_texture_handle) {
-            // The application is responsible for closing the handle it
-            // received. We just log that we are aware of it.
-            miniav_log(
-                MINIAV_LOG_LEVEL_DEBUG,
-                "MF: App is responsible for closing GPU shared handle %p.",
-                frame_payload->gpu.shared_texture_handle);
+            miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                       "MF: Closing GPU shared handle %p.",
+                       frame_payload->gpu.shared_texture_handle);
+            CloseHandle(frame_payload->gpu.shared_texture_handle);
+            frame_payload->gpu.shared_texture_handle = NULL;
           }
           if (frame_payload->gpu.gpu_texture_ptr) {
             ULONG ref_count =
@@ -1956,6 +2131,10 @@ static MiniAVResultCode mf_start_capture(MiniAVCameraContext *ctx) {
   mf_ctx->app_callback_internal = ctx->app_callback;
   mf_ctx->app_callback_user_data_internal = ctx->app_callback_user_data;
   mf_ctx->parent_ctx->configured_video_format = ctx->configured_video_format;
+  // Fresh timestamp calibration per capture run (MF's sample clock epoch can
+  // change across stream re-arms).
+  memset(&mf_ctx->timebase, 0, sizeof(mf_ctx->timebase));
+  mf_ctx->consecutive_read_failures = 0;
   LeaveCriticalSection(&mf_ctx->critical_section);
 
   // Initial call to ReadSample. Subsequent calls are made from OnReadSample.

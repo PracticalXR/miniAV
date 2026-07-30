@@ -70,6 +70,15 @@ miniav(monorepo)/
 │           │   └── linux/
 │           │       ├── camera_context_linux_pipewire.c # PipeWire implementation.
 │           │       └── camera_context_linux_pipewire.h
+│           ├── input/                # Input capture implementation.
+│           │   ├── input_api.c        # Implementation of public MiniAV_Input_* functions.
+│           │   ├── input_context.h    # Internal input context struct and common logic interface.
+│           │   ├── windows/
+│           │   │   ├── input_context_win_rawinput.c # Low-level hooks + XInput implementation.
+│           │   │   └── input_context_win_rawinput.h
+│           │   └── linux/
+│           │       ├── input_context_linux_libinput.c # libinput implementation (future).
+│           │       └── input_context_linux_libinput.h
 │           └── screen/               # Screen capture implementation.
 │               ├── screen_api.c        # Implementation of public MiniAV_Screen_* functions.
 │               ├── screen_context.h    # Internal screen context struct and common logic interface.
@@ -1296,6 +1305,159 @@ typedef enum {
 1. **Platform native formats** - Avoid conversions
 2. **GPU-compatible formats** - Enable zero-copy workflows
 3. **Hardware-accelerated formats** - Leverage platform strengths
+
+## Input Capture Module
+
+### Overview
+
+The Input Capture module provides raw input event capture for keyboard, mouse, and gamepad devices. Unlike the other MiniAV modules which deal with media buffers, the Input module delivers **structured typed events** via separate callbacks — it does not use `MiniAVBuffer` packing.
+
+This module is designed to be consumed by higher-level services (e.g., input tracking, recording, replay systems) that handle event batching, serialization, and mapping (such as VK→W3C key code translation).
+
+### Design Decisions
+
+* **Typed Callbacks (not buffer packing):** Each input type (keyboard, mouse, gamepad) has its own callback type and event struct. This avoids unnecessary serialization overhead and provides type safety at the C API level.
+* **Configurable Throttle:** Mouse move events can be throttled at the C layer (default 60 Hz) to avoid flooding consumers. Gamepad polling rate is also configurable.
+* **Unified Context:** A single `MiniAVInputContext` handles all enabled input types. A bitmask (`MiniAVInputType`) selects which input types to capture.
+* **No Device Enumeration for Keyboard/Mouse:** Keyboard and mouse are system-wide hooks — no enumeration needed. Gamepad devices support enumeration.
+* **Windows-First Implementation:** Initial backend uses `SetWindowsHookEx` with `WH_KEYBOARD_LL` and `WH_MOUSE_LL` for keyboard/mouse (requires a dedicated thread with a message pump), and XInput for gamepad polling.
+* **Raw Events:** MiniAV delivers platform-native event data (e.g., Windows virtual key codes, raw coordinates). Higher-level mapping (VK→W3C, coordinate normalization) is the consumer's responsibility.
+
+### C API Types
+
+```c
+// Input type bitmask for selecting which inputs to capture
+typedef enum {
+    MINIAV_INPUT_TYPE_KEYBOARD = 0x01,
+    MINIAV_INPUT_TYPE_MOUSE    = 0x02,
+    MINIAV_INPUT_TYPE_GAMEPAD  = 0x04,
+} MiniAVInputType;
+
+// Keyboard action
+typedef enum {
+    MINIAV_KEY_ACTION_DOWN = 0,
+    MINIAV_KEY_ACTION_UP   = 1,
+} MiniAVKeyAction;
+
+// Mouse action
+typedef enum {
+    MINIAV_MOUSE_ACTION_MOVE        = 0,
+    MINIAV_MOUSE_ACTION_BUTTON_DOWN = 1,
+    MINIAV_MOUSE_ACTION_BUTTON_UP   = 2,
+    MINIAV_MOUSE_ACTION_WHEEL       = 3,
+} MiniAVMouseAction;
+
+// Mouse button identifiers
+typedef enum {
+    MINIAV_MOUSE_BUTTON_NONE   = 0,
+    MINIAV_MOUSE_BUTTON_LEFT   = 1,
+    MINIAV_MOUSE_BUTTON_RIGHT  = 2,
+    MINIAV_MOUSE_BUTTON_MIDDLE = 3,
+    MINIAV_MOUSE_BUTTON_X1     = 4,
+    MINIAV_MOUSE_BUTTON_X2     = 5,
+} MiniAVMouseButton;
+
+// Event structs
+typedef struct {
+    uint64_t timestamp_us;
+    uint32_t key_code;     // Platform virtual key code
+    uint32_t scan_code;    // Hardware scan code
+    MiniAVKeyAction action;
+} MiniAVKeyboardEvent;
+
+typedef struct {
+    uint64_t timestamp_us;
+    int32_t x;             // Absolute screen X
+    int32_t y;             // Absolute screen Y
+    int32_t delta_x;       // Relative movement X
+    int32_t delta_y;       // Relative movement Y
+    int32_t wheel_delta;   // Scroll wheel delta
+    MiniAVMouseAction action;
+    MiniAVMouseButton button;
+} MiniAVMouseEvent;
+
+typedef struct {
+    uint64_t timestamp_us;
+    uint32_t gamepad_index;
+    uint16_t buttons;      // Bitmask of pressed buttons
+    int16_t left_stick_x;
+    int16_t left_stick_y;
+    int16_t right_stick_x;
+    int16_t right_stick_y;
+    uint8_t left_trigger;
+    uint8_t right_trigger;
+    bool connected;
+} MiniAVGamepadEvent;
+
+// Typed callbacks
+typedef void (*MiniAVKeyboardCallback)(const MiniAVKeyboardEvent* event, void* user_data);
+typedef void (*MiniAVMouseCallback)(const MiniAVMouseEvent* event, void* user_data);
+typedef void (*MiniAVGamepadCallback)(const MiniAVGamepadEvent* event, void* user_data);
+
+// Configuration
+typedef struct {
+    uint32_t input_types;       // Bitmask of MiniAVInputType
+    uint32_t mouse_throttle_hz; // 0 = no throttle, default = 60
+    uint32_t gamepad_poll_hz;   // 0 = default (60)
+    MiniAVKeyboardCallback keyboard_callback;
+    MiniAVMouseCallback mouse_callback;
+    MiniAVGamepadCallback gamepad_callback;
+    void* user_data;
+} MiniAVInputConfig;
+
+typedef struct MiniAVInputContext* MiniAVInputContextHandle;
+```
+
+### C API Functions
+
+```c
+// Gamepad enumeration
+MiniAVResultCode MiniAV_Input_EnumerateGamepads(MiniAVDeviceInfo** devices, uint32_t* count);
+
+// Context lifecycle
+MiniAVResultCode MiniAV_Input_CreateContext(MiniAVInputContextHandle* context);
+MiniAVResultCode MiniAV_Input_DestroyContext(MiniAVInputContextHandle context);
+MiniAVResultCode MiniAV_Input_Configure(MiniAVInputContextHandle context, const MiniAVInputConfig* config);
+MiniAVResultCode MiniAV_Input_StartCapture(MiniAVInputContextHandle context);
+MiniAVResultCode MiniAV_Input_StopCapture(MiniAVInputContextHandle context);
+```
+
+### Folder Structure Additions
+
+```
+miniav_ffi/miniav_c/src/
+    input/
+        input_context.h         # Internal vtable, backend table, context struct
+        input_api.c             # Public API implementation
+        windows/
+            input_context_win_rawinput.h
+            input_context_win_rawinput.c   # WH_KEYBOARD_LL, WH_MOUSE_LL, XInput
+        test/
+            test_input_capture.c
+```
+
+### Platform-Specific Implementation Notes
+
+**Windows:**
+* Keyboard/Mouse: `SetWindowsHookEx` with `WH_KEYBOARD_LL` / `WH_MOUSE_LL` on a dedicated thread running `GetMessage` message pump.
+* Gamepad: XInput polling on a timer thread at configurable rate.
+* Libraries: `user32.lib`, `xinput.lib` (or `xinput9_1_0.lib`)
+
+**Future Platforms:**
+* Linux: libinput or `/dev/input/event*` for keyboard/mouse, evdev for gamepad
+* macOS: IOKit HID / CGEventTap for keyboard/mouse, IOKit HID for gamepad
+
+### Dart Layer
+
+The Dart layer follows the same pattern as other modules:
+* `miniav_platform_interface`: `MiniInputPlatformInterface` + `MiniInputContextPlatformInterface`
+* `miniav_ffi`: `MiniAVFFIInputPlatform` + `MiniAVFFIInputContextPlatform` with `NativeCallable.listener` for each typed callback
+* `miniav`: `MiniInput` + `MiniInputContext` top-level facades
+
+Platform types added to `miniav_platform_types.dart`:
+* `MiniAVInputType`, `MiniAVKeyAction`, `MiniAVMouseAction`, `MiniAVMouseButton` enums
+* `MiniAVKeyboardEvent`, `MiniAVMouseEvent`, `MiniAVGamepadEvent` classes
+* `MiniAVInputConfig` class
 
 ## Considerations for Computer Vision
 

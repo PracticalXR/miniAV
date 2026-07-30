@@ -1,3 +1,7 @@
+#include "../common/miniav_device_watcher.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include "../common/miniav_logging.h"
 #include "../common/miniav_utils.h" // For miniav_calloc, miniav_free, miniav_strdup
 #include "loopback_context.h"
@@ -15,14 +19,14 @@ extern MiniAVResultCode miniav_loopback_context_platform_init_windows_wasapi(
 #endif
 
 // Example for macOS (e.g., in loopback_context_macos_coreaudio.c)
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
 extern const LoopbackContextInternalOps
     g_loopback_ops_macos_coreaudio;
 extern MiniAVResultCode miniav_loopback_context_platform_init_macos_coreaudio(
     MiniAVLoopbackContext *ctx);
 #endif
 
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 extern const LoopbackContextInternalOps
     g_loopback_ops_linux_pipewire;
 extern MiniAVResultCode miniav_loopback_context_platform_init_linux_pipewire(
@@ -37,11 +41,11 @@ static const MiniAVLoopbackBackend g_loopback_backends[] = {
     {"WASAPI", &g_loopback_ops_wasapi,
      miniav_loopback_context_platform_init_windows_wasapi},
 #endif
-#ifdef __APPLE__
+#if defined(__APPLE__) && !TARGET_OS_IPHONE
     {"CoreAudio", &g_loopback_ops_macos_coreaudio,
      miniav_loopback_context_platform_init_macos_coreaudio},
 #endif
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
     {"PipeWire", &g_loopback_ops_linux_pipewire,
      miniav_loopback_context_platform_init_linux_pipewire},
 #endif
@@ -293,7 +297,18 @@ MiniAV_Loopback_DestroyContext(MiniAVLoopbackContextHandle context_handle) {
   }
 
   if (ctx->ops && ctx->ops->destroy_platform) {
-    ctx->ops->destroy_platform(ctx); // This should free ctx->platform_ctx
+    MiniAVResultCode destroy_res =
+        ctx->ops->destroy_platform(ctx); // This should free ctx->platform_ctx
+    if (destroy_res == MINIAV_ERROR_TIMEOUT) {
+      // The platform layer could not reap a capture thread and leaked its
+      // platform context. That thread also dereferences THIS parent context
+      // (callbacks, configured format), so it must be leaked too — freeing
+      // it here would be a use-after-free.
+      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                 "Loopback DestroyContext: platform teardown timed out — "
+                 "leaking the context (a capture thread is still alive).");
+      return destroy_res;
+    }
   } else {
     miniav_log(MINIAV_LOG_LEVEL_WARN,
                "destroy_platform op not available for loopback context. "
@@ -465,6 +480,9 @@ MiniAV_Loopback_StartCapture(MiniAVLoopbackContextHandle context_handle,
     return MINIAV_ERROR_ALREADY_RUNNING;
   }
 
+  // Re-enable callback dispatch in case MiniAV_Dispose() was called previously.
+  miniav_dispatch_set_enabled(1);
+
   ctx->app_callback = callback;
   ctx->app_callback_user_data = user_data;
 
@@ -541,4 +559,30 @@ MiniAV_Loopback_GetConfiguredFormat(MiniAVLoopbackContextHandle context_handle,
       MINIAV_LOG_LEVEL_ERROR,
       "Cannot get configured format: context not configured or op missing.");
   return MINIAV_ERROR_NOT_INITIALIZED;
+}
+// --- Loopback device change / context-lost subscriptions ---
+
+static MiniAVDeviceWatcher *g_loopback_watcher = NULL;
+
+static MiniAVResultCode loopback_enum_adapter(
+    MiniAVDeviceInfo **devices_out, uint32_t *count_out, void *ud) {
+  (void)ud;
+  return MiniAV_Loopback_EnumerateTargets(MINIAV_LOOPBACK_TARGET_SYSTEM_AUDIO,
+                                          devices_out, count_out);
+}
+
+MiniAVResultCode MiniAV_Loopback_SetDeviceChangeCallback(
+    MiniAVDeviceChangeCallback callback, void *user_data) {
+  return miniav_device_watcher_set(&g_loopback_watcher, loopback_enum_adapter,
+                                   NULL, callback, user_data, 1500);
+}
+
+MiniAVResultCode MiniAV_Loopback_SetContextLostCallback(
+    MiniAVLoopbackContextHandle context_handle,
+    MiniAVContextLostCallback callback, void *user_data) {
+  MiniAVLoopbackContext *ctx = (MiniAVLoopbackContext *)context_handle;
+  if (!ctx) return MINIAV_ERROR_INVALID_ARG;
+  ctx->lost_cb = callback;
+  ctx->lost_cb_user_data = user_data;
+  return MINIAV_SUCCESS;
 }

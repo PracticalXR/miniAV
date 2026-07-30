@@ -1,24 +1,14 @@
 name: miniav
 description: A cross-platform capture library for audio and video providing a standard buffer with GPU path
-version: 0.4.5
-publish_to: none
+version: 0.7.0
 repository: https://github.com/PracticalXR/miniAV/tree/master/miniav
 
 environment:
-  sdk: ^3.9.0-21.0.dev
+  sdk: ^3.11.4
 
 dependencies:
-  miniav_platform_interface:
-    path: ../miniav_platform_interface
+  miniav_platform_interface: 0.7.0
 
 dev_dependencies:
   lints: ^5.0.0
-  test: ^1.25.15
-
-  platforms:
-  windows:
-  android:
-  linux:
-  ios:
-  macos:
-  web:
+  test: ^1.31.0

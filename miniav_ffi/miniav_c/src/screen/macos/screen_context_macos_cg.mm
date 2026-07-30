@@ -1,5 +1,6 @@
 #include "screen_context_macos_cg.h"
 #include "../../common/miniav_logging.h"
+#include "../../common/miniav_time.h"
 #include "../../common/miniav_utils.h"
 #include "../../../include/miniav_buffer.h"
 #include <mach/mach_time.h>
@@ -19,6 +20,9 @@
 #else
 #define HAS_SCREEN_CAPTURE_KIT 0
 #endif
+
+// Queue-specific tag for same-queue reentrancy detection on captureQueue.
+static const void* kMiniAVScreenQueueKey = &kMiniAVScreenQueueKey;
 
 // Forward declare the enum outside struct
 typedef enum {
@@ -40,10 +44,31 @@ typedef struct CGScreenPlatformContext {
     // Legacy Core Graphics capture (fallback)
     CGDirectDisplayID displayID;
     dispatch_source_t captureTimer;
+
+    // Region capture: when captureRegion is true, the SCStream is cropped to
+    // regionRect (points, top-left origin) via SCStreamConfiguration.sourceRect.
+    bool captureRegion;
+    CGRect regionRect;
     
     // Timing
     mach_timebase_info_data_t timebase;
-    
+    // Rebases SCK sample PTS (session clock) onto the shared
+    // miniav_get_time_us() epoch (reset at start_capture).
+    MiniAVTimebase ts_rebase;
+    // One-shot guard so didStopWithError fires lost_cb exactly once per run.
+    std::atomic<bool> lost_cb_fired;
+
+    // Async start-chain coordination. The SCK setup chain signals
+    // startChainSem exactly once when it reaches a terminal state. A bumped
+    // startGeneration abandons an in-flight chain: its blocks bail (and stop
+    // any stream they just started) instead of touching a context the caller
+    // has moved past. startChainPending tracks an unconsumed terminal signal
+    // so stop/destroy/a later start can drain it — destroy MUST NOT free the
+    // context while a chain is pending (the blocks dereference it).
+    dispatch_semaphore_t startChainSem;
+    std::atomic<uint32_t> startGeneration;
+    std::atomic<bool> startChainPending;
+
     // Callback info (following WGC pattern)
     MiniAVBufferCallback app_callback_internal;
     void* app_callback_user_data_internal;
@@ -329,7 +354,15 @@ static MiniAVPixelFormat CGBitmapInfoToMiniAVPixelFormat(CGBitmapInfo bitmapInfo
     
     // Set common video properties
     buffer->type = MINIAV_BUFFER_TYPE_VIDEO;
-    buffer->timestamp_us = CMTimeGetSeconds(timestamp) * 1000000;
+    // Rebase the SCK sample PTS (session clock, own epoch) onto the shared
+    // miniav_get_time_us() timeline with integer math so screen timestamps
+    // are comparable with the other tracks.
+    if (CMTIME_IS_NUMERIC(timestamp)) {
+        CMTime tsUs = CMTimeConvertScale(timestamp, 1000000, kCMTimeRoundingMethod_Default);
+        buffer->timestamp_us = miniav_rebase_time_us(&_cgCtx->ts_rebase, (uint64_t)tsUs.value);
+    } else {
+        buffer->timestamp_us = miniav_get_time_us();
+    }
     buffer->data.video.info.frame_rate_numerator = _cgCtx->configured_video_format.frame_rate_numerator;
     buffer->data.video.info.frame_rate_denominator = _cgCtx->configured_video_format.frame_rate_denominator;
     buffer->data.video.info.output_preference = _cgCtx->configured_video_format.output_preference;
@@ -341,6 +374,21 @@ static MiniAVPixelFormat CGBitmapInfoToMiniAVPixelFormat(CGBitmapInfo bitmapInfo
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
     if (error) {
         miniav_log(MINIAV_LOG_LEVEL_ERROR, "SCK: Stream stopped with error: %s", [[error localizedDescription] UTF8String]);
+        // Out-of-band stop (display disconnect, permission revoked,
+        // sleep/wake): mark capture dead and tell the app — previously this
+        // only logged, leaving is_streaming true and the app waiting for
+        // frames that never come.
+        if (_cgCtx && _cgCtx->is_streaming.exchange(false)) {
+            if (!_cgCtx->lost_cb_fired.exchange(true)) {
+                MiniAVScreenContext* parent = _cgCtx->parent_ctx;
+                if (parent) {
+                    parent->is_running = false;
+                    if (parent->lost_cb) {
+                        parent->lost_cb((int)MINIAV_ERROR_DEVICE_LOST, parent->lost_cb_user_data);
+                    }
+                }
+            }
+        }
     } else {
         miniav_log(MINIAV_LOG_LEVEL_INFO, "SCK: Stream stopped normally.");
     }
@@ -367,8 +415,19 @@ static void legacy_capture_timer_callback(void* info) {
         }
     
     CGImageRef screenImage = NULL;
-    
-    screenImage = CGDisplayCreateImage(cgCtx->displayID);    
+
+    // The legacy CGDisplayCreateImage path always produces a cursor-LESS image;
+    // there is no cursor-compositing here, so MiniAV_Screen_SetCaptureCursor
+    // (ctx->capture_cursor) cannot be honored on this fallback. It only runs on
+    // pre-macOS-15 systems where ScreenCaptureKit (which does honor showsCursor)
+    // was unavailable; use the SCK path when you need the cursor.
+    if (cgCtx->parent_ctx && cgCtx->parent_ctx->capture_cursor) {
+        miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                   "CG: Legacy CGDisplayCreateImage cannot draw the cursor; "
+                   "capturing cursor-less despite capture_cursor=true.");
+    }
+
+    screenImage = CGDisplayCreateImage(cgCtx->displayID);
     if (!screenImage) {
         miniav_log(MINIAV_LOG_LEVEL_ERROR, "CG: Failed to create screen image.");
         return;
@@ -511,15 +570,20 @@ static MiniAVResultCode cg_init_platform(MiniAVScreenContext* ctx) {
     ctx->platform_ctx = cgCtx;
     cgCtx->parent_ctx = ctx;
     cgCtx->is_streaming = false;
-    
+    cgCtx->startChainSem = dispatch_semaphore_create(0);
+
     // Initialize timing
     if (mach_timebase_info(&cgCtx->timebase) != KERN_SUCCESS) {
         cgCtx->timebase.numer = 1;
         cgCtx->timebase.denom = 1;
     }
-    
+
     @autoreleasepool {
         cgCtx->captureQueue = dispatch_queue_create("com.miniav.screen.captureQueue", DISPATCH_QUEUE_SERIAL);
+        // Tag the queue so stop/destroy drains can detect same-queue
+        // reentrancy (an app stopping from inside its own frame callback).
+        dispatch_queue_set_specific(cgCtx->captureQueue, kMiniAVScreenQueueKey,
+                                    (void*)1, NULL);
         
         // Initialize Metal for GPU path
         cgCtx->metalDevice = MTLCreateSystemDefaultDevice();
@@ -542,18 +606,55 @@ static MiniAVResultCode cg_destroy_platform(MiniAVScreenContext* ctx) {
     if (!ctx || !ctx->platform_ctx) return MINIAV_SUCCESS;
     
     CGScreenPlatformContext* cgCtx = (CGScreenPlatformContext*)ctx->platform_ctx;
-    
+
+    // Abandon any in-flight async start chain and WAIT for its terminal
+    // signal: the chain's blocks dereference cgCtx, so freeing it while a
+    // chain is pending is a use-after-free. If the chain does not terminate
+    // in time (e.g. an unanswered Screen Recording permission prompt keeping
+    // SCShareableContent pending), deliberately LEAK the platform context —
+    // a bounded leak beats freed memory an SCK block will still touch.
+    cgCtx->startGeneration.fetch_add(1);
+    if (cgCtx->startChainPending.load()) {
+        if (dispatch_semaphore_wait(
+                cgCtx->startChainSem,
+                dispatch_time(DISPATCH_TIME_NOW, 15 * NSEC_PER_SEC)) == 0) {
+            cgCtx->startChainPending = false;
+        } else {
+            // MINIAV_ERROR_TIMEOUT tells MiniAV_Screen_DestroyContext to
+            // also leak the parent context (uniform leak protocol).
+            miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                       "SCK: async start chain still pending at destroy — "
+                       "leaking the context to avoid a use-after-free (the "
+                       "abandoned chain will stop any stream it started).");
+            ctx->platform_ctx = NULL;
+            return MINIAV_ERROR_TIMEOUT;
+        }
+    }
+
     @autoreleasepool {
         if (cgCtx->is_streaming) {
             // Stop any ongoing capture
             cgCtx->is_streaming = false;
         }
-        
+
         // Clean up ScreenCaptureKit resources
 #if HAS_SCREEN_CAPTURE_KIT
         if (@available(macOS 12.3, *)) {
             if (cgCtx->scStream) {
-                [cgCtx->scStream stopCaptureWithCompletionHandler:nil];
+                // Bounded wait (same as cg_stop_capture) — the old
+                // fire-and-forget stop let SCK teardown race the frees below.
+                dispatch_semaphore_t stopSem = dispatch_semaphore_create(0);
+                [cgCtx->scStream stopCaptureWithCompletionHandler:^(NSError* error) {
+                    (void)error;
+                    dispatch_semaphore_signal(stopSem);
+                }];
+                if (dispatch_semaphore_wait(
+                        stopSem,
+                        dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+                    miniav_log(MINIAV_LOG_LEVEL_WARN,
+                               "SCK: stopCapture completion timed out during destroy.");
+                }
+                dispatch_release(stopSem); // MRC: balance the create
                 cgCtx->scStream = nil;
             }
             cgCtx->scDelegate = nil;
@@ -566,20 +667,31 @@ static MiniAVResultCode cg_destroy_platform(MiniAVScreenContext* ctx) {
             dispatch_source_cancel(cgCtx->captureTimer);
             cgCtx->captureTimer = NULL;
         }
-        
+
         // Clean up Metal resources
         if (cgCtx->textureCache) {
             CVMetalTextureCacheFlush(cgCtx->textureCache, 0);
             CFRelease(cgCtx->textureCache);
             cgCtx->textureCache = NULL;
         }
-        
+
         if (cgCtx->captureQueue) {
+            // Drain in-flight sample/timer blocks before freeing the context
+            // they dereference — releasing the queue while a block still runs
+            // was a use-after-free on shutdown. (Same-queue reentrancy guard
+            // as in stop_capture.)
+            if (dispatch_get_specific(kMiniAVScreenQueueKey) == NULL) {
+                dispatch_sync(cgCtx->captureQueue, ^{});
+            }
             dispatch_release(cgCtx->captureQueue);
             cgCtx->captureQueue = nil;
         }
+        if (cgCtx->startChainSem) {
+            dispatch_release(cgCtx->startChainSem);
+            cgCtx->startChainSem = NULL;
+        }
     }
-    
+
     miniav_free(cgCtx);
     ctx->platform_ctx = NULL;
     
@@ -696,14 +808,55 @@ static MiniAVResultCode cg_configure_window(MiniAVScreenContext* ctx, const char
 }
 
 static MiniAVResultCode cg_configure_region(MiniAVScreenContext* ctx, const char* target_id, int x, int y, int width, int height, const MiniAVVideoInfo* format) {
-    MINIAV_UNUSED(ctx);
-    MINIAV_UNUSED(target_id);
-    MINIAV_UNUSED(x);
-    MINIAV_UNUSED(y);
-    MINIAV_UNUSED(width);
-    MINIAV_UNUSED(height);
-    MINIAV_UNUSED(format);
-    return MINIAV_ERROR_NOT_SUPPORTED;
+    if (!ctx || !ctx->platform_ctx) return MINIAV_ERROR_INVALID_ARG;
+    if (width <= 0 || height <= 0) return MINIAV_ERROR_INVALID_ARG;
+    CGScreenPlatformContext* cgCtx = (CGScreenPlatformContext*)ctx->platform_ctx;
+
+    // Region = a sub-rectangle of a display. Resolve the target display the
+    // same way cg_configure_display does — enumerated ids are "display_%u"
+    // (parsing as bare %u would fail and silently fall back to the main
+    // display, capturing the wrong monitor).
+    CGDirectDisplayID displayID = CGMainDisplayID();
+    if (target_id && target_id[0] != '\0') {
+        unsigned int parsed = 0;
+        if (sscanf(target_id, "display_%u", &parsed) == 1 && parsed != 0) {
+            displayID = (CGDirectDisplayID)parsed;
+        } else if (sscanf(target_id, "%u", &parsed) == 1 && parsed != 0) {
+            displayID = (CGDirectDisplayID)parsed; // tolerate a bare id too
+        }
+    }
+    cgCtx->displayID = displayID;
+    cgCtx->current_target_type = CG_TARGET_DISPLAY;
+    cgCtx->captureRegion = true;
+    // SCStreamConfiguration.sourceRect is in POINTS with a top-left origin,
+    // which matches the (x,y,width,height) the caller passes.
+    cgCtx->regionRect = CGRectMake((CGFloat)x, (CGFloat)y,
+                                   (CGFloat)width, (CGFloat)height);
+
+    // Adopt the caller's format (frame rate, pixel format) the way
+    // configure_display does, THEN override the size with the region — the
+    // frame rate feeds minimumFrameInterval at start, and 0/0 would make an
+    // invalid CMTime and report 0 fps on every delivered buffer.
+    if (format) {
+        cgCtx->configured_video_format = *format;
+    }
+    cgCtx->configured_video_format.width = (uint32_t)width;
+    cgCtx->configured_video_format.height = (uint32_t)height;
+    if (cgCtx->configured_video_format.frame_rate_numerator == 0 ||
+        cgCtx->configured_video_format.frame_rate_denominator == 0) {
+        cgCtx->configured_video_format.frame_rate_numerator = 60;
+        cgCtx->configured_video_format.frame_rate_denominator = 1;
+    }
+
+    ctx->is_configured = true;
+    ctx->configured_video_format = cgCtx->configured_video_format;
+
+    miniav_log(MINIAV_LOG_LEVEL_INFO,
+               "SCK: Region capture configured on display %u: %d,%d %dx%d @ %u/%u fps.",
+               (unsigned)displayID, x, y, width, height,
+               cgCtx->configured_video_format.frame_rate_numerator,
+               cgCtx->configured_video_format.frame_rate_denominator);
+    return MINIAV_SUCCESS;
 }
 
 static MiniAVResultCode cg_start_capture(MiniAVScreenContext* ctx, MiniAVBufferCallback callback, void* user_data) {
@@ -727,9 +880,48 @@ static MiniAVResultCode cg_start_capture(MiniAVScreenContext* ctx, MiniAVBufferC
     @autoreleasepool {
 #if HAS_SCREEN_CAPTURE_KIT
         if (@available(macOS 12.3, *)) {
+            // The SCK setup chain is asynchronous, but StartCapture must
+            // report a REAL result: previously this function returned
+            // MINIAV_SUCCESS unconditionally, so permission/setup failures
+            // were invisible (is_running true, zero frames forever). The
+            // completion handlers run on SCK's own queues, so blocking the
+            // calling thread here cannot deadlock them.
+            //
+            // Abandonment protocol: on timeout we bump startGeneration and
+            // return an error — the still-running chain sees the stale
+            // generation, undoes anything it started, and signals
+            // startChainSem exactly once. stop/destroy (and any later start)
+            // consume that signal; destroy refuses to free the context while
+            // a chain is pending (the blocks dereference it).
+            if (cgCtx->startChainPending.load()) {
+                if (dispatch_semaphore_wait(
+                        cgCtx->startChainSem,
+                        dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) == 0) {
+                    cgCtx->startChainPending = false;
+                } else {
+                    miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                               "SCK: A previous start attempt is still pending — "
+                               "refusing to start another.");
+                    return MINIAV_ERROR_TIMEOUT;
+                }
+            }
+            const uint32_t startGen = cgCtx->startGeneration.fetch_add(1) + 1;
+            cgCtx->startChainPending = true;
+            __block MiniAVResultCode startResult = MINIAV_ERROR_SYSTEM_CALL_FAILED;
+            memset(&cgCtx->ts_rebase, 0, sizeof(cgCtx->ts_rebase));
+            cgCtx->lost_cb_fired = false;
             [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent* content, NSError* error) {
+                if (cgCtx->startGeneration.load() != startGen) {
+                    // Abandoned (timeout/stop/destroy) — do not touch setup
+                    // state; just deliver the terminal signal.
+                    dispatch_semaphore_signal(cgCtx->startChainSem);
+                    return;
+                }
                 if (error || !content) {
-                    miniav_log(MINIAV_LOG_LEVEL_ERROR, "SCK: Failed to get shareable content");
+                    miniav_log(MINIAV_LOG_LEVEL_ERROR, "SCK: Failed to get shareable content%s%s",
+                               error ? ": " : "",
+                               error ? [[error localizedDescription] UTF8String] : "");
+                    dispatch_semaphore_signal(cgCtx->startChainSem);
                     return;
                 }
                 
@@ -747,18 +939,36 @@ static MiniAVResultCode cg_start_capture(MiniAVScreenContext* ctx, MiniAVBufferC
                 
                 if (!targetDisplay) {
                     miniav_log(MINIAV_LOG_LEVEL_ERROR, "SCK: No displays available for capture");
+                    dispatch_semaphore_signal(cgCtx->startChainSem);
                     return;
                 }
                 
                 SCContentFilter* filter = [[SCContentFilter alloc] initWithDisplay:targetDisplay excludingWindows:@[]];
                 
                 cgCtx->scStreamConfig = [[SCStreamConfiguration alloc] init];
-                cgCtx->scStreamConfig.width = targetDisplay.width;
-                cgCtx->scStreamConfig.height = targetDisplay.height;
+                if (cgCtx->captureRegion) {
+                    // Crop to the configured sub-rectangle. sourceRect is in
+                    // points (top-left origin); output buffers are the region
+                    // size.
+                    cgCtx->scStreamConfig.sourceRect = cgCtx->regionRect;
+                    cgCtx->scStreamConfig.width = (size_t)cgCtx->regionRect.size.width;
+                    cgCtx->scStreamConfig.height = (size_t)cgCtx->regionRect.size.height;
+                } else {
+                    cgCtx->scStreamConfig.width = targetDisplay.width;
+                    cgCtx->scStreamConfig.height = targetDisplay.height;
+                }
                 cgCtx->scStreamConfig.pixelFormat = kCVPixelFormatType_32BGRA;
-                cgCtx->scStreamConfig.minimumFrameInterval = CMTimeMake(cgCtx->configured_video_format.frame_rate_denominator, 
+                cgCtx->scStreamConfig.minimumFrameInterval = CMTimeMake(cgCtx->configured_video_format.frame_rate_denominator,
                                                                        cgCtx->configured_video_format.frame_rate_numerator);
                 cgCtx->scStreamConfig.queueDepth = 3;
+                // Draw the mouse cursor into captured frames when requested via
+                // MiniAV_Screen_SetCaptureCursor (default false -> cursor-less,
+                // unchanged behavior). showsCursor exists on
+                // SCStreamConfiguration since macOS 12.3, i.e. it is always
+                // valid inside this @available(macos 12.3) block.
+                cgCtx->scStreamConfig.showsCursor = ctx->capture_cursor ? YES : NO;
+                miniav_log(MINIAV_LOG_LEVEL_DEBUG, "SCK: showsCursor=%s",
+                           ctx->capture_cursor ? "YES" : "NO");
                 
                 if (ctx->capture_audio_requested) {
                     cgCtx->scStreamConfig.capturesAudio = YES;
@@ -780,9 +990,10 @@ static MiniAVResultCode cg_start_capture(MiniAVScreenContext* ctx, MiniAVBufferC
                                                      sampleHandlerQueue:cgCtx->captureQueue 
                                                                   error:&addVideoOutputError];
                 if (!videoSuccess) {
-                    miniav_log(MINIAV_LOG_LEVEL_ERROR, "SCK: Failed to add video output: %s", 
+                    miniav_log(MINIAV_LOG_LEVEL_ERROR, "SCK: Failed to add video output: %s",
                               addVideoOutputError ? [[addVideoOutputError localizedDescription] UTF8String] : "Unknown error");
                     [filter release];
+                    dispatch_semaphore_signal(cgCtx->startChainSem);
                     return;
                 }
                 
@@ -802,18 +1013,48 @@ static MiniAVResultCode cg_start_capture(MiniAVScreenContext* ctx, MiniAVBufferC
                 }
                 
                 [cgCtx->scStream startCaptureWithCompletionHandler:^(NSError* error) {
+                    if (cgCtx->startGeneration.load() != startGen) {
+                        // Abandoned while starting: don't leave a headless
+                        // stream running (nobody will ever stop it) and
+                        // don't publish is_streaming/startResult.
+                        if (!error && cgCtx->scStream) {
+                            [cgCtx->scStream stopCaptureWithCompletionHandler:nil];
+                        }
+                        dispatch_semaphore_signal(cgCtx->startChainSem);
+                        return;
+                    }
                     if (error) {
-                        miniav_log(MINIAV_LOG_LEVEL_ERROR, "SCK: Failed to start stream: %s", 
+                        miniav_log(MINIAV_LOG_LEVEL_ERROR, "SCK: Failed to start stream: %s",
                                   [[error localizedDescription] UTF8String]);
                     } else {
                         cgCtx->is_streaming = true;
-                        miniav_log(MINIAV_LOG_LEVEL_INFO, "SCK: Screen capture started (video:%s, audio:%s)", 
+                        startResult = MINIAV_SUCCESS;
+                        miniav_log(MINIAV_LOG_LEVEL_INFO, "SCK: Screen capture started (video:%s, audio:%s)",
                                   "YES", ctx->capture_audio_requested ? "YES" : "NO");
                     }
+                    dispatch_semaphore_signal(cgCtx->startChainSem);
                 }];
-                
+
                 [filter release];
             }];
+            // Bounded wait for the async chain to reach a definitive state.
+            if (dispatch_semaphore_wait(
+                    cgCtx->startChainSem,
+                    dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) {
+                miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                           "SCK: StartCapture timed out waiting for setup — "
+                           "abandoning the attempt (the chain will clean up "
+                           "after itself).");
+                // Abandon: the chain sees the stale generation, undoes any
+                // started stream, and signals; startChainPending stays true
+                // until stop/destroy/a later start consumes that signal.
+                cgCtx->startGeneration.fetch_add(1);
+                return MINIAV_ERROR_TIMEOUT;
+            }
+            cgCtx->startChainPending = false;
+            if (startResult != MINIAV_SUCCESS) {
+                return startResult;
+            }
         } else {
 #endif
             // Fallback to legacy Core Graphics capture
@@ -853,18 +1094,47 @@ static MiniAVResultCode cg_stop_capture(MiniAVScreenContext* ctx) {
     }
     
     CGScreenPlatformContext* cgCtx = (CGScreenPlatformContext*)ctx->platform_ctx;
-    
+
+    // Abandon any in-flight async start chain (from a timed-out start) and
+    // consume its terminal signal, BEFORE the is_streaming early-out — a
+    // pending chain can exist while is_streaming is still false.
+    cgCtx->startGeneration.fetch_add(1);
+    if (cgCtx->startChainPending.load()) {
+        if (dispatch_semaphore_wait(
+                cgCtx->startChainSem,
+                dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) == 0) {
+            cgCtx->startChainPending = false;
+        }
+    }
+
     if (!cgCtx->is_streaming) {
         return MINIAV_SUCCESS;
     }
-    
+
     cgCtx->is_streaming = false;
-    
+
     @autoreleasepool {
 #if HAS_SCREEN_CAPTURE_KIT
         if (@available(macOS 12.3, *)) {
             if (cgCtx->scStream) {
-                [cgCtx->scStream stopCaptureWithCompletionHandler:nil];
+                // Bounded wait for the stream to actually stop (the old
+                // fire-and-forget nil handler let teardown race in-flight
+                // sample callbacks).
+                dispatch_semaphore_t stopSem = dispatch_semaphore_create(0);
+                [cgCtx->scStream stopCaptureWithCompletionHandler:^(NSError* error) {
+                    if (error) {
+                        miniav_log(MINIAV_LOG_LEVEL_WARN, "SCK: stopCapture error: %s",
+                                  [[error localizedDescription] UTF8String]);
+                    }
+                    dispatch_semaphore_signal(stopSem);
+                }];
+                if (dispatch_semaphore_wait(
+                        stopSem,
+                        dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+                    miniav_log(MINIAV_LOG_LEVEL_WARN,
+                               "SCK: stopCapture completion timed out.");
+                }
+                dispatch_release(stopSem); // MRC: balance the create
                 cgCtx->scStream = nil;
             }
             cgCtx->scDelegate = nil;
@@ -878,8 +1148,16 @@ static MiniAVResultCode cg_stop_capture(MiniAVScreenContext* ctx) {
 #if HAS_SCREEN_CAPTURE_KIT
         }
 #endif
+        // Drain any in-flight sample-handler block before returning — the
+        // caller may clear callbacks or free the context right after. Skip
+        // when already ON captureQueue (stop called from a frame callback):
+        // dispatch_sync onto the current serial queue would self-deadlock.
+        if (cgCtx->captureQueue &&
+            dispatch_get_specific(kMiniAVScreenQueueKey) == NULL) {
+            dispatch_sync(cgCtx->captureQueue, ^{});
+        }
     }
-    
+
     miniav_log(MINIAV_LOG_LEVEL_INFO, "CG: Screen capture stopped");
     return MINIAV_SUCCESS;
 }

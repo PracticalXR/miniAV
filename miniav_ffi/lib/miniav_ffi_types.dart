@@ -113,11 +113,19 @@ extension MiniAVBufferFFI on MiniAVBuffer {
         video.info.pixel_formatAsInt,
       );
 
-      // Planes and strides
+      // Planes, strides, dmabuf fds, and drm modifiers
       final numPlanes = 4; // Your struct has 4 planes/strides
       final strideBytes = List<int>.generate(
         numPlanes,
         (i) => video.planes[i].stride_bytes,
+      );
+      final dmabufFds = List<int>.generate(
+        numPlanes,
+        (i) => video.planes[i].dmabuf_fd,
+      );
+      final drmFormatModifiers = List<int>.generate(
+        numPlanes,
+        (i) => video.planes[i].drm_format_modifier,
       );
       final planes = List<Uint8List?>.generate(numPlanes, (i) {
         final planePtr = video.planes[i].data_ptr;
@@ -133,7 +141,9 @@ extension MiniAVBufferFFI on MiniAVBuffer {
       });
       final nativeHandles = List<Object?>.generate(numPlanes, (i) {
         final handle = video.planes[i].data_ptr;
-        return handle.address != 0 ? handle : null;
+        // Store the pointer address as int so StandardMessageCodec can
+        // serialise it across the platform channel (Pointer<> is not supported).
+        return handle.address != 0 ? handle.address : null;
       });
 
       videoBuffer = MiniAVVideoBuffer(
@@ -143,6 +153,8 @@ extension MiniAVBufferFFI on MiniAVBuffer {
         strideBytes: strideBytes,
         planes: planes,
         nativeHandles: nativeHandles,
+        dmabufFds: dmabufFds,
+        drmFormatModifiers: drmFormatModifiers,
       );
     } else if (type == bindings.MiniAVBufferType.MINIAV_BUFFER_TYPE_AUDIO) {
       final audio = native.data.audio;
@@ -152,9 +164,11 @@ extension MiniAVBufferFFI on MiniAVBuffer {
       // Audio data
       Uint8List audioData = Uint8List(0);
       if (audio.data != ffi.nullptr) {
-        // You may need to know the correct size; here we use frame_count * channels * sample size
-        // If you have a data_size field, use it!
         final channels = info.channels;
+        // info.num_frames is set to the actual delivered frame count by all
+        // known native backends (e.g. WASAPI sets it to num_frames_available).
+        // audio.frame_count is only set on some platforms (macOS); on Windows
+        // it stays 0. Use num_frames as the primary source.
         final frames = info.num_frames;
         int bytesPerSample;
         switch (format) {
@@ -176,7 +190,10 @@ extension MiniAVBufferFFI on MiniAVBuffer {
       }
 
       audioBuffer = MiniAVAudioBuffer(
-        frameCount: audio.frame_count,
+        // frame_count is set on macOS/Linux; on Windows WASAPI it stays 0
+        // (only info.num_frames is populated). Fall back to num_frames so
+        // the Dart encoder always sees the correct sample count.
+        frameCount: audio.frame_count > 0 ? audio.frame_count : info.num_frames,
         info: MiniAVAudioInfo(
           format: MiniAVAudioFormat.values[format.value],
           sampleRate: info.sample_rate,
@@ -194,6 +211,12 @@ extension MiniAVBufferFFI on MiniAVBuffer {
       data: videoBuffer ?? audioBuffer,
       dataSizeBytes: dataSizeBytes,
       nativeHandle: native.internal_handle,
+      nativeFence: MiniAVNativeFence(
+        syncFd: native.native_fence.sync_fd,
+        d3d11FencePtr: native.native_fence.d3d11_fence.address,
+        metalSharedEventPtr: native.native_fence.metal_shared_event.address,
+        metalFenceValue: native.native_fence.metal_fence_value,
+      ),
     );
   }
 }
@@ -523,4 +546,67 @@ extension AudioInfoFFIToPlatform on AudioInfo {
     native.channels = info.channels;
     native.num_frames = info.numFrames;
   }
+}
+
+// --- Input Capture Type Conversions ---
+
+/// Convert native MiniAVKeyboardEvent to platform type.
+MiniAVKeyboardEvent keyboardEventFromNative(
+  bindings.MiniAVKeyboardEvent native,
+) {
+  return MiniAVKeyboardEvent(
+    timestampUs: native.timestamp_us,
+    keyCode: native.key_code,
+    scanCode: native.scan_code,
+    action: MiniAVKeyAction.fromValue(native.actionAsInt),
+  );
+}
+
+/// Convert native MiniAVMouseEvent to platform type.
+MiniAVMouseEvent mouseEventFromNative(bindings.MiniAVMouseEvent native) {
+  return MiniAVMouseEvent(
+    timestampUs: native.timestamp_us,
+    x: native.x,
+    y: native.y,
+    deltaX: native.delta_x,
+    deltaY: native.delta_y,
+    wheelDelta: native.wheel_delta,
+    wheelDeltaX: native.wheel_delta_x,
+    action: MiniAVMouseAction.fromValue(native.actionAsInt),
+    button: MiniAVMouseButton.fromValue(native.buttonAsInt),
+    isAbsolute: native.is_absolute,
+  );
+}
+
+/// Convert native MiniAVGamepadEvent to platform type.
+MiniAVGamepadEvent gamepadEventFromNative(bindings.MiniAVGamepadEvent native) {
+  return MiniAVGamepadEvent(
+    timestampUs: native.timestamp_us,
+    gamepadIndex: native.gamepad_index,
+    buttons: native.buttons,
+    leftStickX: native.left_stick_x,
+    leftStickY: native.left_stick_y,
+    rightStickX: native.right_stick_x,
+    rightStickY: native.right_stick_y,
+    leftTrigger: native.left_trigger,
+    rightTrigger: native.right_trigger,
+    connected: native.connected,
+  );
+}
+
+/// Copy MiniAVInputConfig to a native struct, setting callback pointers.
+void copyInputConfigToNative(
+  MiniAVInputConfig config,
+  bindings.MiniAVInputConfig native, {
+  required bindings.MiniAVKeyboardCallback keyboardCb,
+  required bindings.MiniAVMouseCallback mouseCb,
+  required bindings.MiniAVGamepadCallback gamepadCb,
+}) {
+  native.input_types = config.inputTypes;
+  native.mouse_throttle_hz = config.mouseThrottleHz;
+  native.gamepad_poll_hz = config.gamepadPollHz;
+  native.keyboard_callback = keyboardCb;
+  native.mouse_callback = mouseCb;
+  native.gamepad_callback = gamepadCb;
+  native.user_data = ffi.nullptr;
 }

@@ -16,6 +16,7 @@
 #include <mach/mach.h>
 #include <pthread.h>
 #include <Foundation/Foundation.h>
+#include <CoreMedia/CoreMedia.h>
 #include <sys/sysctl.h>
 
 // Audio Tap APIs (macOS 10.10+) - use the correct headers
@@ -28,16 +29,43 @@
 #define HAS_AUDIO_TAP_API 0
 #endif
 
+// ScreenCaptureKit system-audio capture. SCStream audio output is available on
+// macOS 13.0+ and needs no third-party virtual device, so it is the preferred
+// system-audio fallback below the 14.2+ private Audio Tap API and ahead of the
+// BlackHole/Loopback virtual-device requirement.
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 130000
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
+#define HAS_SCK_AUDIO_API 1
+#else
+#define HAS_SCK_AUDIO_API 0
+#endif
+
 // --- Forward Declarations ---
 static MiniAVResultCode coreaudio_stop_capture(MiniAVLoopbackContext* ctx);
+struct CoreAudioLoopbackPlatformContext;
+#if HAS_SCK_AUDIO_API
+API_AVAILABLE(macos(13.0))
+static void coreaudio_sck_teardown(struct CoreAudioLoopbackPlatformContext* platCtx);
+#endif
 
 // --- Capture Mode Enum ---
 typedef enum {
     CAPTURE_MODE_NONE,
     CAPTURE_MODE_VIRTUAL_DEVICE,         // Virtual audio device (BlackHole, etc.)
     CAPTURE_MODE_SYSTEM_TAP,             // System-wide audio tap
-    CAPTURE_MODE_PROCESS_TAP             // Process-specific audio tap
+    CAPTURE_MODE_PROCESS_TAP,            // Process-specific audio tap
+    CAPTURE_MODE_SCK_AUDIO               // ScreenCaptureKit system-audio (macOS 13.0+)
 } CoreAudioCaptureMode;
+
+// Forward declaration of the SCK audio delegate (defined below, guarded).
+#if HAS_SCK_AUDIO_API
+@class MiniAVLoopbackSCKAudioDelegate;
+// Queue-specific tag for same-queue reentrancy detection on the SCK audio
+// queue (an app stopping from inside its own audio callback) — mirrors the
+// screen backend's captureQueue guard so the teardown drain does not
+// self-deadlock.
+static const void* kMiniAVLoopbackSCKQueueKey = &kMiniAVLoopbackSCKQueueKey;
+#endif
 
 // --- Platform Specific Context ---
 typedef struct CoreAudioLoopbackPlatformContext {
@@ -67,10 +95,35 @@ typedef struct CoreAudioLoopbackPlatformContext {
     // Synchronization
     pthread_mutex_t capture_mutex;
     bool should_stop_capture;
-    
+
     // Capture mode
     CoreAudioCaptureMode capture_mode;
-    
+
+    // Device-lost detection: DeviceIsAlive listener on the device driving
+    // capture (aggregate/tap device or the virtual device).
+    AudioDeviceID alive_monitored_device;
+    bool alive_listener_installed;
+    bool lost_cb_fired; // one-shot per capture run
+
+    // --- ScreenCaptureKit system-audio capture (macOS 13.0+) ---------------
+#if HAS_SCK_AUDIO_API
+    SCStream* sck_stream API_AVAILABLE(macos(13.0));
+    SCStreamConfiguration* sck_config API_AVAILABLE(macos(13.0));
+    MiniAVLoopbackSCKAudioDelegate* sck_delegate API_AVAILABLE(macos(13.0));
+    dispatch_queue_t sck_audio_queue; // dedicated serial queue for audio output
+
+    // Async start-chain coordination (mirrors the screen backend's hardened
+    // cg_start_capture). The SCK setup chain signals sck_start_sem exactly
+    // once when it reaches a terminal state; a bumped sck_start_generation
+    // abandons an in-flight chain so a timed-out start does not UAF the
+    // context; sck_start_pending tracks an unconsumed terminal signal so
+    // stop/destroy can drain it before freeing anything.
+    dispatch_semaphore_t sck_start_sem;
+    volatile int32_t sck_start_generation;
+    volatile bool sck_start_pending;
+    volatile bool sck_is_streaming; // set true only once SCK actually started
+#endif
+
 } CoreAudioLoopbackPlatformContext;
 
 // --- Helper Functions ---
@@ -360,8 +413,12 @@ static OSStatus AudioTapIOProc(AudioObjectID          objID,
             mavBuffer_ptr->content_type = MINIAV_BUFFER_CONTENT_TYPE_CPU;
             mavBuffer_ptr->timestamp_us = AudioConvertHostTimeToNanos(inNow->mHostTime) / 1000;
             
-            // Calculate frame count from buffer size and format
-            uint32_t frame_count = sourceBuffer->mDataByteSize / platCtx->stream_format.mBytesPerFrame;
+            // Calculate frame count from buffer size and format (guard the
+            // divisor: a zeroed/unnegotiated ASBD would fault here).
+            uint32_t frame_count =
+                platCtx->stream_format.mBytesPerFrame
+                    ? sourceBuffer->mDataByteSize / platCtx->stream_format.mBytesPerFrame
+                    : 0;
             
             mavBuffer_ptr->data.audio.frame_count = frame_count;
             mavBuffer_ptr->data.audio.info.sample_rate = (uint32_t)platCtx->stream_format.mSampleRate;
@@ -447,11 +504,259 @@ static OSStatus AudioInputCallback(void* inRefCon, AudioUnitRenderActionFlags* i
             miniav_free(mavBuffer_ptr);
         }
     }
-    
+
     return noErr;
 }
 
+// --- ScreenCaptureKit system-audio delegate (macOS 13.0+) -----------------
+// Delivers system loopback audio via SCStream on stock macOS 13.x machines
+// with no third-party virtual driver. The audio sample-buffer path mirrors
+// AudioTapIOProc's exact buffer-building contract: payload +
+// MiniAVBuffer + PCM copy + MINIAV_NATIVE_HANDLE_TYPE_AUDIO + timestamp +
+// app_callback. Manual retain/release (no ARC).
+#if HAS_SCK_AUDIO_API
+API_AVAILABLE(macos(13.0))
+@interface MiniAVLoopbackSCKAudioDelegate : NSObject <SCStreamDelegate, SCStreamOutput>
+{
+    CoreAudioLoopbackPlatformContext* _platCtx;
+}
+- (instancetype)initWithPlatformContext:(CoreAudioLoopbackPlatformContext*)platCtx;
+@end
+
+@implementation MiniAVLoopbackSCKAudioDelegate
+
+- (instancetype)initWithPlatformContext:(CoreAudioLoopbackPlatformContext*)platCtx {
+    self = [super init];
+    if (self) {
+        _platCtx = platCtx;
+    }
+    return self;
+}
+
+- (void)stream:(SCStream *)stream
+    didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
+                   ofType:(SCStreamOutputType)type {
+    (void)stream;
+    if (type != SCStreamOutputTypeAudio) {
+        return;
+    }
+    CoreAudioLoopbackPlatformContext* platCtx = _platCtx;
+    if (!platCtx || !platCtx->is_capturing) {
+        return;
+    }
+    MiniAVLoopbackContext* ctx = platCtx->parent_ctx;
+    if (!ctx || !ctx->app_callback) {
+        return;
+    }
+    if (!sampleBuffer || !CMSampleBufferIsValid(sampleBuffer)) {
+        return;
+    }
+
+    // Describe the real delivered format from the sample's ASBD.
+    CMFormatDescriptionRef formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer);
+    if (!formatDesc) {
+        return;
+    }
+    const AudioStreamBasicDescription* asbd =
+        CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc);
+    if (!asbd) {
+        return;
+    }
+
+    // Pull the interleaved PCM bytes out of the sample's block buffer. SCK
+    // delivers linear PCM; a contiguous data pointer is the common case.
+    CMBlockBufferRef blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer);
+    if (!blockBuffer) {
+        return;
+    }
+    size_t totalLength = 0;
+    char* dataPtr = NULL;
+    OSStatus st = CMBlockBufferGetDataPointer(blockBuffer, 0, NULL, &totalLength, &dataPtr);
+    if (st != noErr || !dataPtr || totalLength == 0) {
+        return;
+    }
+
+    MiniAVNativeBufferInternalPayload* payload =
+        (MiniAVNativeBufferInternalPayload*)miniav_calloc(1, sizeof(MiniAVNativeBufferInternalPayload));
+    MiniAVBuffer* mavBuffer_ptr = (MiniAVBuffer*)miniav_calloc(1, sizeof(MiniAVBuffer));
+    if (!payload || !mavBuffer_ptr) {
+        miniav_free(payload);
+        miniav_free(mavBuffer_ptr);
+        return;
+    }
+
+    payload->handle_type = MINIAV_NATIVE_HANDLE_TYPE_AUDIO;
+    payload->context_owner = ctx;
+    payload->parent_miniav_buffer_ptr = mavBuffer_ptr;
+    mavBuffer_ptr->internal_handle = payload;
+
+    void* audioCopy = miniav_calloc(totalLength, 1);
+    if (!audioCopy) {
+        miniav_free(payload);
+        miniav_free(mavBuffer_ptr);
+        return;
+    }
+    memcpy(audioCopy, dataPtr, totalLength);
+    payload->native_singular_resource_ptr = audioCopy;
+
+    CMItemCount frameCount = CMSampleBufferGetNumSamples(sampleBuffer);
+
+    mavBuffer_ptr->type = MINIAV_BUFFER_TYPE_AUDIO;
+    mavBuffer_ptr->content_type = MINIAV_BUFFER_CONTENT_TYPE_CPU;
+    // NOTE: this file does not include miniav_time.h and the tap/virtual-device
+    // paths stamp via AudioConvertHostTimeToNanos (host clock, not rebased).
+    // Match the SCREEN backend's SCK audio path exactly (CMTimeGetSeconds)
+    // rather than introduce a rebase state field with new thread ownership.
+    mavBuffer_ptr->timestamp_us =
+        (uint64_t)(CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1000000.0);
+
+    mavBuffer_ptr->data.audio.frame_count = (uint32_t)frameCount;
+    mavBuffer_ptr->data.audio.info.sample_rate = (uint32_t)asbd->mSampleRate;
+    mavBuffer_ptr->data.audio.info.channels = asbd->mChannelsPerFrame;
+    mavBuffer_ptr->data.audio.info.format = CoreAudioFormatToMiniAV(asbd);
+    mavBuffer_ptr->data.audio.info.num_frames = (uint32_t)frameCount;
+    mavBuffer_ptr->data.audio.data = audioCopy;
+
+    mavBuffer_ptr->data_size_bytes = totalLength;
+    mavBuffer_ptr->user_data = ctx->app_callback_user_data;
+
+    ctx->app_callback(mavBuffer_ptr, ctx->app_callback_user_data);
+}
+
+- (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
+    (void)stream;
+    CoreAudioLoopbackPlatformContext* platCtx = _platCtx;
+    if (!platCtx) {
+        return;
+    }
+    if (error) {
+        miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                   "CoreAudio: SCK audio stream stopped with error: %s",
+                   [[error localizedDescription] UTF8String]);
+    } else {
+        miniav_log(MINIAV_LOG_LEVEL_INFO,
+                   "CoreAudio: SCK audio stream stopped normally.");
+    }
+    // Out-of-band stop (permission revoked, display gone): mark capture dead
+    // and notify the app exactly once — mirrors the screen backend.
+    if (platCtx->is_capturing && !platCtx->lost_cb_fired) {
+        platCtx->lost_cb_fired = true;
+        platCtx->is_capturing = false;
+        MiniAVLoopbackContext* parent = platCtx->parent_ctx;
+        if (parent) {
+            parent->is_running = false;
+            if (parent->lost_cb) {
+                parent->lost_cb((int)MINIAV_ERROR_DEVICE_LOST,
+                                parent->lost_cb_user_data);
+            }
+        }
+    }
+}
+
+@end
+#endif // HAS_SCK_AUDIO_API
+
 // Find the best virtual audio device for system capture
+// --- Device-lost detection ------------------------------------------------
+// Previously nothing observed the capture device's liveness: if the tapped
+// process exited, the virtual device (e.g. BlackHole) was removed, or the
+// aggregate device died, the app saw silent callback starvation with no
+// diagnostic. A DeviceIsAlive property listener now fires lost_cb once.
+
+static const AudioObjectPropertyAddress kMiniAVDeviceAliveAddr = {
+    kAudioDevicePropertyDeviceIsAlive,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain
+};
+
+static OSStatus coreaudio_device_alive_listener(
+    AudioObjectID inObjectID, UInt32 inNumberAddresses,
+    const AudioObjectPropertyAddress* inAddresses, void* inClientData) {
+    (void)inNumberAddresses;
+    (void)inAddresses;
+    CoreAudioLoopbackPlatformContext* platCtx =
+        (CoreAudioLoopbackPlatformContext*)inClientData;
+    if (!platCtx) return noErr;
+    UInt32 alive = 1;
+    UInt32 size = sizeof(alive);
+    OSStatus st = AudioObjectGetPropertyData(
+        inObjectID, &kMiniAVDeviceAliveAddr, 0, NULL, &size, &alive);
+    if (st != noErr || alive == 0) {
+        if (platCtx->is_capturing && !platCtx->lost_cb_fired) {
+            platCtx->lost_cb_fired = true;
+            miniav_log(MINIAV_LOG_LEVEL_WARN,
+                       "CoreAudio: Capture device %u is gone — notifying app.",
+                       (unsigned int)inObjectID);
+            MiniAVLoopbackContext* parent = platCtx->parent_ctx;
+            if (parent && parent->lost_cb) {
+                // Runs on CoreAudio's notification thread — per the
+                // MiniAVContextLostCallback contract the app must not
+                // synchronously Stop/Destroy from inside the callback
+                // (StopCapture removes THIS listener, which synchronizes
+                // with in-flight invocations → self-deadlock).
+                parent->lost_cb((int)MINIAV_ERROR_DEVICE_LOST,
+                                parent->lost_cb_user_data);
+            }
+        }
+    }
+    return noErr;
+}
+
+static void coreaudio_install_alive_listener(
+    CoreAudioLoopbackPlatformContext* platCtx, AudioDeviceID device) {
+    if (platCtx->alive_listener_installed || device == kAudioObjectUnknown) {
+        return;
+    }
+    OSStatus st = AudioObjectAddPropertyListener(
+        device, &kMiniAVDeviceAliveAddr, coreaudio_device_alive_listener,
+        platCtx);
+    if (st == noErr) {
+        platCtx->alive_monitored_device = device;
+        platCtx->alive_listener_installed = true;
+    } else {
+        miniav_log(MINIAV_LOG_LEVEL_WARN,
+                   "CoreAudio: Failed to install device-alive listener: %d",
+                   (int)st);
+    }
+}
+
+static void coreaudio_remove_alive_listener(
+    CoreAudioLoopbackPlatformContext* platCtx) {
+    if (!platCtx->alive_listener_installed) {
+        return;
+    }
+    AudioObjectRemovePropertyListener(platCtx->alive_monitored_device,
+                                      &kMiniAVDeviceAliveAddr,
+                                      coreaudio_device_alive_listener, platCtx);
+    platCtx->alive_monitored_device = kAudioObjectUnknown;
+    platCtx->alive_listener_installed = false;
+}
+
+// Reads the device's current stream format (the format IO callbacks will
+// actually deliver). Returns true and fills out on success.
+// kAudioDevicePropertyStreamFormat is deprecated in modern SDKs (superseded
+// by stream-level kAudioStreamPropertyVirtualFormat) but remains functional;
+// silenced locally so downstream -Werror=deprecated-declarations builds
+// don't break. TODO(P2): migrate to the stream-object query.
+static bool coreaudio_read_device_format(AudioObjectID device,
+                                         AudioObjectPropertyScope scope,
+                                         AudioStreamBasicDescription* out) {
+    if (device == kAudioObjectUnknown || !out) {
+        return false;
+    }
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    AudioObjectPropertyAddress addr = {
+        kAudioDevicePropertyStreamFormat,
+        scope,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 size = sizeof(*out);
+    OSStatus st = AudioObjectGetPropertyData(device, &addr, 0, NULL, &size, out);
+#pragma clang diagnostic pop
+    return st == noErr && out->mSampleRate > 0 && out->mBytesPerFrame > 0;
+}
+
 static AudioDeviceID FindVirtualAudioDevice(void) {
     AudioObjectPropertyAddress prop_addr = {
         kAudioHardwarePropertyDevices,
@@ -540,12 +845,28 @@ static MiniAVResultCode coreaudio_destroy_platform(MiniAVLoopbackContext* ctx) {
     if (!ctx || !ctx->platform_ctx) return MINIAV_SUCCESS;
     
     CoreAudioLoopbackPlatformContext* platCtx = (CoreAudioLoopbackPlatformContext*)ctx->platform_ctx;
-    
+
     // Stop capture if running
     if (platCtx->is_capturing) {
         coreaudio_stop_capture(ctx);
     }
-    
+
+#if HAS_SCK_AUDIO_API
+    // Unconditionally tear down SCK: a timed-out start can leave a pending
+    // chain / allocated stream while is_capturing is false, so the
+    // is_capturing-gated stop above would skip it. coreaudio_sck_teardown
+    // drains the abandoned chain and releases the stream/config/delegate/queue
+    // (each exactly once — idempotent if stop already ran). Then free the
+    // start semaphore created lazily in coreaudio_sck_start.
+    if (@available(macOS 13.0, *)) {
+        coreaudio_sck_teardown(platCtx);
+        if (platCtx->sck_start_sem) {
+            dispatch_release(platCtx->sck_start_sem);
+            platCtx->sck_start_sem = NULL;
+        }
+    }
+#endif
+
     // Clean up AudioUnit
     if (platCtx->input_unit) {
         AudioUnitUninitialize(platCtx->input_unit);
@@ -902,17 +1223,123 @@ static MiniAVResultCode coreaudio_enumerate_targets(MiniAVLoopbackTargetType tar
     return MINIAV_SUCCESS;
 }
 
+// Resolves the AudioDeviceID whose format best describes what capture will
+// deliver for the given loopback target: an explicit virtual device when
+// named, otherwise the system default OUTPUT device (loopback captures what
+// is being played). pid:/window:/system_tap targets mix through the default
+// output device's format.
+static AudioObjectID coreaudio_format_query_device(const char* target_device_id) {
+    if (target_device_id &&
+        strncmp(target_device_id, "virtual_device:", 15) == 0) {
+        unsigned dev = 0;
+        if (sscanf(target_device_id + 15, "%u", &dev) == 1) {
+            return (AudioObjectID)dev;
+        }
+    }
+    AudioObjectID dev = kAudioObjectUnknown;
+    AudioObjectPropertyAddress addr = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 size = sizeof(dev);
+    if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL,
+                                   &size, &dev) != noErr) {
+        return kAudioObjectUnknown;
+    }
+    return dev;
+}
+
 static MiniAVResultCode coreaudio_get_default_format(const char* target_device_id, MiniAVAudioInfo* format_out) {
     if (!format_out) return MINIAV_ERROR_INVALID_ARG;
     memset(format_out, 0, sizeof(MiniAVAudioInfo));
-    
+
+    // Query the real device instead of returning a hardcoded 44.1kHz/2ch
+    // constant that ignored target_device_id entirely.
+    AudioObjectID dev = coreaudio_format_query_device(target_device_id);
+    AudioStreamBasicDescription asbd;
+    if (coreaudio_read_device_format(dev, kAudioObjectPropertyScopeOutput, &asbd) ||
+        coreaudio_read_device_format(dev, kAudioObjectPropertyScopeInput, &asbd)) {
+        format_out->format = CoreAudioFormatToMiniAV(&asbd);
+        format_out->sample_rate = (uint32_t)asbd.mSampleRate;
+        format_out->channels = asbd.mChannelsPerFrame;
+        format_out->num_frames = 1024;
+        miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                   "CoreAudio: Default loopback format from device %u: %uHz %uch (format %d).",
+                   (unsigned)dev, format_out->sample_rate, format_out->channels,
+                   format_out->format);
+        return MINIAV_SUCCESS;
+    }
+
     format_out->sample_rate = 44100;
     format_out->channels = 2;
     format_out->format = MINIAV_AUDIO_FORMAT_F32;
     format_out->num_frames = 1024;
-    
-    miniav_log(MINIAV_LOG_LEVEL_DEBUG, "CoreAudio: Default format: 44.1kHz, 2 channels, float32");
+    miniav_log(MINIAV_LOG_LEVEL_WARN,
+               "CoreAudio: Could not query device format for '%s' — returning "
+               "fallback 44.1kHz/2ch/F32.",
+               target_device_id ? target_device_id : "(default)");
     return MINIAV_SUCCESS;
+}
+
+static MiniAVResultCode coreaudio_get_supported_formats(const char* target_device_id,
+                                                        MiniAVAudioInfo** formats_out,
+                                                        uint32_t* count_out) {
+    if (!formats_out || !count_out) return MINIAV_ERROR_INVALID_ARG;
+    *formats_out = NULL;
+    *count_out = 0;
+
+    // Minimal but honest implementation (this op used to be a NULL pointer,
+    // making MiniAV_Loopback_GetSupportedFormats fail unconditionally on
+    // macOS): report the device's current format — the one capture will
+    // actually deliver.
+    MiniAVAudioInfo current;
+    MiniAVResultCode res = coreaudio_get_default_format(target_device_id, &current);
+    if (res != MINIAV_SUCCESS) return res;
+
+    *formats_out = (MiniAVAudioInfo*)miniav_calloc(1, sizeof(MiniAVAudioInfo));
+    if (!*formats_out) return MINIAV_ERROR_OUT_OF_MEMORY;
+    (*formats_out)[0] = current;
+    *count_out = 1;
+    return MINIAV_SUCCESS;
+}
+
+// Picks the system-audio capture mode with the required preference order:
+//   Audio Tap (14.2+) -> SCK audio (13.0+) -> virtual device -> error.
+// The Audio Tap private API only actually works on macOS 14.2+; below that the
+// AudioHardwareCreateProcessTap path fails at start, so when the SDK is present
+// but we are on an older OS we prefer SCK (no third-party driver needed) and
+// only fall through to a virtual device if neither is available. Sets
+// platCtx->capture_mode (and virtual_device_id for the VD case) and returns
+// MINIAV_SUCCESS, or MINIAV_ERROR_NOT_SUPPORTED when nothing is available.
+static MiniAVResultCode coreaudio_choose_system_audio_mode(
+    CoreAudioLoopbackPlatformContext* platCtx) {
+#if HAS_AUDIO_TAP_API
+    if (@available(macOS 14.2, *)) {
+        platCtx->capture_mode = CAPTURE_MODE_SYSTEM_TAP;
+        miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                   "CoreAudio: Configured for system audio capture (Audio Tap, macOS 14.2+).");
+        return MINIAV_SUCCESS;
+    }
+#endif
+#if HAS_SCK_AUDIO_API
+    if (@available(macOS 13.0, *)) {
+        platCtx->capture_mode = CAPTURE_MODE_SCK_AUDIO;
+        miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                   "CoreAudio: Configured for system audio capture (ScreenCaptureKit, macOS 13.0+).");
+        return MINIAV_SUCCESS;
+    }
+#endif
+    platCtx->virtual_device_id = FindVirtualAudioDevice();
+    if (platCtx->virtual_device_id != kAudioObjectUnknown) {
+        platCtx->capture_mode = CAPTURE_MODE_VIRTUAL_DEVICE;
+        miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                   "CoreAudio: Configured for system audio capture (Virtual Device).");
+        return MINIAV_SUCCESS;
+    }
+    miniav_log(MINIAV_LOG_LEVEL_ERROR,
+               "CoreAudio: No system audio capture method available.");
+    return MINIAV_ERROR_NOT_SUPPORTED;
 }
 
 static MiniAVResultCode coreaudio_configure_loopback(MiniAVLoopbackContext* ctx,
@@ -969,20 +1396,11 @@ static MiniAVResultCode coreaudio_configure_loopback(MiniAVLoopbackContext* ctx,
         return MINIAV_ERROR_NOT_SUPPORTED;
         #endif
     } else if (target_info && target_info->type == MINIAV_LOOPBACK_TARGET_SYSTEM_AUDIO) {
-        #if HAS_AUDIO_TAP_API
-        platCtx->capture_mode = CAPTURE_MODE_SYSTEM_TAP;
-        miniav_log(MINIAV_LOG_LEVEL_DEBUG, "CoreAudio: Configured for system audio capture (Audio Tap)");
-        #else
-        // Fallback to virtual device
-        platCtx->virtual_device_id = FindVirtualAudioDevice();
-        if (platCtx->virtual_device_id != kAudioObjectUnknown) {
-            platCtx->capture_mode = CAPTURE_MODE_VIRTUAL_DEVICE;
-            miniav_log(MINIAV_LOG_LEVEL_DEBUG, "CoreAudio: Configured for system audio capture (Virtual Device)");
-        } else {
-            miniav_log(MINIAV_LOG_LEVEL_ERROR, "CoreAudio: No system audio capture method available");
-            return MINIAV_ERROR_NOT_SUPPORTED;
+        // Order: Audio Tap (14.2+) -> SCK audio (13.0+) -> virtual device.
+        MiniAVResultCode mode_res = coreaudio_choose_system_audio_mode(platCtx);
+        if (mode_res != MINIAV_SUCCESS) {
+            return mode_res;
         }
-        #endif
     } else if (target_device_id) {
         if (strncmp(target_device_id, "pid:", 4) == 0) {
             #if HAS_AUDIO_TAP_API
@@ -1024,14 +1442,16 @@ static MiniAVResultCode coreaudio_configure_loopback(MiniAVLoopbackContext* ctx,
             miniav_log(MINIAV_LOG_LEVEL_ERROR, "CoreAudio: Window capture not supported in this build");
             return MINIAV_ERROR_NOT_SUPPORTED;
             #endif
-        } else if (strcmp(target_device_id, "system_tap") == 0) {
-            #if HAS_AUDIO_TAP_API
-            platCtx->capture_mode = CAPTURE_MODE_SYSTEM_TAP;
-            miniav_log(MINIAV_LOG_LEVEL_DEBUG, "CoreAudio: Configured for system audio tap");
-            #else
-            miniav_log(MINIAV_LOG_LEVEL_ERROR, "CoreAudio: System tap not supported in this build");
-            return MINIAV_ERROR_NOT_SUPPORTED;
-            #endif
+        } else if (strcmp(target_device_id, "system_tap") == 0 ||
+                   strcmp(target_device_id, "system_audio_capture") == 0) {
+            // System-audio device id: apply the same preference order as the
+            // MINIAV_LOOPBACK_TARGET_SYSTEM_AUDIO branch so a stock macOS 13.x
+            // machine with no virtual driver gets SCK audio instead of failing.
+            // Order: Audio Tap (14.2+) -> SCK audio (13.0+) -> virtual device.
+            MiniAVResultCode mode_res = coreaudio_choose_system_audio_mode(platCtx);
+            if (mode_res != MINIAV_SUCCESS) {
+                return mode_res;
+            }
         } else if (strcmp(target_device_id, "process_tap") == 0) {
             #if HAS_AUDIO_TAP_API
             platCtx->capture_mode = CAPTURE_MODE_PROCESS_TAP;
@@ -1075,9 +1495,232 @@ static MiniAVResultCode coreaudio_get_configured_format(MiniAVLoopbackContext* c
     format_out->channels = platCtx->stream_format.mChannelsPerFrame;
     format_out->format = CoreAudioFormatToMiniAV(&platCtx->stream_format);
     format_out->num_frames = 1024; // Default frame count
-    
+
     return MINIAV_SUCCESS;
 }
+
+#if HAS_SCK_AUDIO_API
+// Tears down the SCStream audio path with the same bounded-completion +
+// queue-drain protocol the screen backend uses. Safe to call whether or not a
+// stream was ever created. MUST be balanced against coreaudio_sck_start (every
+// alloc'd stream/config/delegate released exactly once). Runs under the SDK
+// availability guard supplied by the caller.
+API_AVAILABLE(macos(13.0))
+static void coreaudio_sck_teardown(CoreAudioLoopbackPlatformContext* platCtx) {
+    @autoreleasepool {
+        // Abandon any in-flight async start chain and consume its terminal
+        // signal so a timed-out start's block cannot touch freed state.
+        __sync_fetch_and_add(&platCtx->sck_start_generation, 1);
+        if (platCtx->sck_start_pending && platCtx->sck_start_sem) {
+            if (dispatch_semaphore_wait(
+                    platCtx->sck_start_sem,
+                    dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) == 0) {
+                platCtx->sck_start_pending = false;
+            } else {
+                miniav_log(MINIAV_LOG_LEVEL_WARN,
+                           "CoreAudio: SCK start chain still pending at teardown.");
+            }
+        }
+
+        if (platCtx->sck_stream) {
+            // Bounded wait for the stream to actually stop so teardown does
+            // not race in-flight audio sample callbacks.
+            dispatch_semaphore_t stopSem = dispatch_semaphore_create(0);
+            [platCtx->sck_stream stopCaptureWithCompletionHandler:^(NSError* error) {
+                if (error) {
+                    miniav_log(MINIAV_LOG_LEVEL_WARN,
+                               "CoreAudio: SCK stopCapture error: %s",
+                               [[error localizedDescription] UTF8String]);
+                }
+                dispatch_semaphore_signal(stopSem);
+            }];
+            if (dispatch_semaphore_wait(
+                    stopSem,
+                    dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+                miniav_log(MINIAV_LOG_LEVEL_WARN,
+                           "CoreAudio: SCK stopCapture completion timed out.");
+            }
+            dispatch_release(stopSem); // MRC: balance the create
+            [platCtx->sck_stream release];
+            platCtx->sck_stream = nil;
+        }
+        if (platCtx->sck_config) {
+            [platCtx->sck_config release];
+            platCtx->sck_config = nil;
+        }
+        if (platCtx->sck_delegate) {
+            [platCtx->sck_delegate release];
+            platCtx->sck_delegate = nil;
+        }
+        // Drain any in-flight audio sample-handler block before returning so
+        // the caller may clear callbacks or free the context right after. Skip
+        // when already ON the audio queue (stop called from inside a sample
+        // callback): dispatch_sync onto the current serial queue would
+        // self-deadlock.
+        if (platCtx->sck_audio_queue) {
+            if (dispatch_get_specific(kMiniAVLoopbackSCKQueueKey) == NULL) {
+                dispatch_sync(platCtx->sck_audio_queue, ^{});
+            }
+            dispatch_release(platCtx->sck_audio_queue);
+            platCtx->sck_audio_queue = nil;
+        }
+        platCtx->sck_is_streaming = false;
+    }
+}
+
+// Starts SCStream system-audio capture. Mirrors the hardened bounded-semaphore
+// start pattern from screen_context_macos_cg.mm's cg_start_capture: block on an
+// async getShareableContent->configure->startCapture chain with a 10s timeout
+// (MINIAV_ERROR_TIMEOUT), every failure branch signals the semaphore exactly
+// once, and a generation guard abandons a timed-out chain so its blocks bail
+// instead of using freed state. Returns MINIAV_SUCCESS only once SCK actually
+// started. Must be called with the capture_mutex HELD by the caller (matches
+// the tap/virtual-device paths). Runs under the caller's availability guard.
+API_AVAILABLE(macos(13.0))
+static MiniAVResultCode coreaudio_sck_start(MiniAVLoopbackContext* ctx,
+                                            CoreAudioLoopbackPlatformContext* platCtx) {
+    @autoreleasepool {
+        if (!platCtx->sck_start_sem) {
+            platCtx->sck_start_sem = dispatch_semaphore_create(0);
+            if (!platCtx->sck_start_sem) {
+                return MINIAV_ERROR_OUT_OF_MEMORY;
+            }
+        }
+        // Dedicated serial queue for the audio SCStreamOutput.
+        platCtx->sck_audio_queue =
+            dispatch_queue_create("com.miniav.loopback.sck.audio", DISPATCH_QUEUE_SERIAL);
+        if (!platCtx->sck_audio_queue) {
+            return MINIAV_ERROR_SYSTEM_CALL_FAILED;
+        }
+        // Tag the queue so teardown can detect same-queue reentrancy (an app
+        // stopping from inside its own audio callback) and skip the drain.
+        dispatch_queue_set_specific(platCtx->sck_audio_queue,
+                                    kMiniAVLoopbackSCKQueueKey, (void*)1, NULL);
+
+        const int32_t startGen = __sync_add_and_fetch(&platCtx->sck_start_generation, 1);
+        platCtx->sck_start_pending = true;
+        __block MiniAVResultCode startResult = MINIAV_ERROR_SYSTEM_CALL_FAILED;
+
+        [SCShareableContent getShareableContentWithCompletionHandler:^(SCShareableContent* content, NSError* error) {
+            if (platCtx->sck_start_generation != startGen) {
+                // Abandoned (timeout/stop/destroy) — deliver terminal signal
+                // only; do not touch setup state.
+                dispatch_semaphore_signal(platCtx->sck_start_sem);
+                return;
+            }
+            if (error || !content) {
+                miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                           "CoreAudio: SCK failed to get shareable content%s%s",
+                           error ? ": " : "",
+                           error ? [[error localizedDescription] UTF8String] : "");
+                dispatch_semaphore_signal(platCtx->sck_start_sem);
+                return;
+            }
+
+            // Audio is display-independent but SCK requires a content filter;
+            // use the first display and exclude no windows.
+            SCDisplay* targetDisplay = content.displays.firstObject;
+            if (!targetDisplay) {
+                miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                           "CoreAudio: SCK has no displays available for the audio filter.");
+                dispatch_semaphore_signal(platCtx->sck_start_sem);
+                return;
+            }
+
+            SCContentFilter* filter =
+                [[SCContentFilter alloc] initWithDisplay:targetDisplay excludingWindows:@[]];
+
+            platCtx->sck_config = [[SCStreamConfiguration alloc] init];
+            platCtx->sck_config.capturesAudio = YES;
+            platCtx->sck_config.sampleRate = 48000;
+            platCtx->sck_config.channelCount = 2;
+            // Do not capture our own process's audio into the loopback.
+            platCtx->sck_config.excludesCurrentProcessAudio = YES;
+
+            platCtx->sck_delegate =
+                [[MiniAVLoopbackSCKAudioDelegate alloc] initWithPlatformContext:platCtx];
+            platCtx->sck_stream = [[SCStream alloc] initWithFilter:filter
+                                                     configuration:platCtx->sck_config
+                                                          delegate:platCtx->sck_delegate];
+
+            NSError* addAudioError = nil;
+            BOOL audioOK = [platCtx->sck_stream addStreamOutput:(id<SCStreamOutput>)platCtx->sck_delegate
+                                                           type:SCStreamOutputTypeAudio
+                                             sampleHandlerQueue:platCtx->sck_audio_queue
+                                                          error:&addAudioError];
+            [filter release];
+            if (!audioOK) {
+                miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                           "CoreAudio: SCK failed to add audio output: %s",
+                           addAudioError ? [[addAudioError localizedDescription] UTF8String]
+                                         : "Unknown error");
+                dispatch_semaphore_signal(platCtx->sck_start_sem);
+                return;
+            }
+
+            [platCtx->sck_stream startCaptureWithCompletionHandler:^(NSError* startErr) {
+                if (platCtx->sck_start_generation != startGen) {
+                    // Abandoned while starting: do not leave a headless stream
+                    // running (nobody would ever stop it).
+                    if (!startErr && platCtx->sck_stream) {
+                        [platCtx->sck_stream stopCaptureWithCompletionHandler:nil];
+                    }
+                    dispatch_semaphore_signal(platCtx->sck_start_sem);
+                    return;
+                }
+                if (startErr) {
+                    miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                               "CoreAudio: SCK failed to start audio stream: %s",
+                               [[startErr localizedDescription] UTF8String]);
+                } else {
+                    platCtx->sck_is_streaming = true;
+                    startResult = MINIAV_SUCCESS;
+                    miniav_log(MINIAV_LOG_LEVEL_INFO,
+                               "CoreAudio: SCK system-audio capture started (48kHz stereo).");
+                }
+                dispatch_semaphore_signal(platCtx->sck_start_sem);
+            }];
+        }];
+
+        // Bounded wait for the async chain to reach a definitive state.
+        if (dispatch_semaphore_wait(
+                platCtx->sck_start_sem,
+                dispatch_time(DISPATCH_TIME_NOW, 10 * NSEC_PER_SEC)) != 0) {
+            miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                       "CoreAudio: SCK StartCapture timed out — abandoning the "
+                       "attempt (the chain cleans up after itself).");
+            // Abandon: the chain sees the stale generation, undoes any started
+            // stream, and signals; sck_start_pending stays true until
+            // stop/destroy consumes that signal.
+            __sync_fetch_and_add(&platCtx->sck_start_generation, 1);
+            return MINIAV_ERROR_TIMEOUT;
+        }
+        platCtx->sck_start_pending = false;
+
+        if (startResult != MINIAV_SUCCESS) {
+            // Setup failed cleanly (not a timeout): release what we built so a
+            // later start / destroy is not left with dangling objects.
+            if (platCtx->sck_stream) {
+                [platCtx->sck_stream release];
+                platCtx->sck_stream = nil;
+            }
+            if (platCtx->sck_config) {
+                [platCtx->sck_config release];
+                platCtx->sck_config = nil;
+            }
+            if (platCtx->sck_delegate) {
+                [platCtx->sck_delegate release];
+                platCtx->sck_delegate = nil;
+            }
+            if (platCtx->sck_audio_queue) {
+                dispatch_release(platCtx->sck_audio_queue);
+                platCtx->sck_audio_queue = nil;
+            }
+        }
+        return startResult;
+    }
+}
+#endif // HAS_SCK_AUDIO_API
 
 
 static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, MiniAVBufferCallback callback, void* user_data) {
@@ -1101,7 +1744,8 @@ static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, Mini
     
     pthread_mutex_lock(&platCtx->capture_mutex);
     platCtx->should_stop_capture = false;
-    
+    platCtx->lost_cb_fired = false; // fresh loss-notification guard per run
+
     OSStatus status = noErr;
     
 #if HAS_AUDIO_TAP_API
@@ -1323,6 +1967,29 @@ static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, Mini
                             return MINIAV_ERROR_SYSTEM_CALL_FAILED;
                         }
                     } else {
+                        // Read back the aggregate device's ACTUAL stream
+                        // format BEFORE starting IO: the IOProc computes
+                        // frame counts from stream_format, and publishing it
+                        // after start would race the realtime thread (and
+                        // the requested format previously stood in for the
+                        // negotiated one entirely).
+                        {
+                            AudioStreamBasicDescription negotiated;
+                            if (coreaudio_read_device_format(platCtx->aggregated_id,
+                                                             kAudioObjectPropertyScopeInput,
+                                                             &negotiated)) {
+                                platCtx->stream_format = negotiated;
+                                miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                                           "CoreAudio: Tap negotiated format %.0fHz %uch %ubytes/frame.",
+                                           negotiated.mSampleRate,
+                                           (unsigned)negotiated.mChannelsPerFrame,
+                                           (unsigned)negotiated.mBytesPerFrame);
+                            } else {
+                                miniav_log(MINIAV_LOG_LEVEL_WARN,
+                                           "CoreAudio: Could not read aggregate device format — "
+                                           "using the requested format.");
+                            }
+                        }
                         status = AudioDeviceStart(platCtx->aggregated_id, platCtx->io_proc_id);
                         if (status != noErr) {
                             miniav_log(MINIAV_LOG_LEVEL_ERROR, "CoreAudio: Failed to start audio device: %d (0x%X)", status, status);
@@ -1342,10 +2009,15 @@ static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, Mini
                                 return MINIAV_ERROR_SYSTEM_CALL_FAILED;
                             }
                         } else {
-                            // Successfully started tap
+                            // Successfully started tap (the negotiated
+                            // format was read back before AudioDeviceStart).
                             platCtx->is_capturing = true;
                             ctx->is_running = true;
                             pthread_mutex_unlock(&platCtx->capture_mutex);
+                            // Outside the mutex: registration talks to
+                            // coreaudiod and must not extend the critical
+                            // section.
+                            coreaudio_install_alive_listener(platCtx, platCtx->aggregated_id);
                             miniav_log(MINIAV_LOG_LEVEL_INFO, "CoreAudio: Audio Tap capture started successfully");
                             return MINIAV_SUCCESS;
                         }
@@ -1355,7 +2027,64 @@ static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, Mini
         } // @autoreleasepool
     }
 #endif // HAS_AUDIO_TAP_API
-    
+
+#if HAS_SCK_AUDIO_API
+    // ScreenCaptureKit system-audio capture (preferred fallback below 14.2,
+    // ahead of the virtual-device requirement).
+    if (platCtx->capture_mode == CAPTURE_MODE_SCK_AUDIO) {
+        if (@available(macOS 13.0, *)) {
+            miniav_log(MINIAV_LOG_LEVEL_INFO,
+                       "CoreAudio: Starting ScreenCaptureKit system-audio capture.");
+            // Mark capturing BEFORE the stream starts so the delegate's audio
+            // sample callbacks are honoured (the mutex is held; the async
+            // start chain blocks the caller until it resolves).
+            platCtx->is_capturing = true;
+            MiniAVResultCode sck_res = coreaudio_sck_start(ctx, platCtx);
+            if (sck_res == MINIAV_SUCCESS) {
+                // SCK delivers 48kHz/2ch/F32 (the config we set); make
+                // get_configured_format report that rather than the caller's
+                // original request, so a downstream encoder is sized correctly.
+                platCtx->stream_format.mSampleRate = 48000;
+                platCtx->stream_format.mChannelsPerFrame = 2;
+                platCtx->stream_format.mFormatID = kAudioFormatLinearPCM;
+                platCtx->stream_format.mFormatFlags =
+                    kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
+                platCtx->stream_format.mBitsPerChannel = 32;
+                platCtx->stream_format.mFramesPerPacket = 1;
+                platCtx->stream_format.mBytesPerFrame = 8;  // 2ch * 4 bytes
+                platCtx->stream_format.mBytesPerPacket = 8;
+                ctx->is_running = true;
+                pthread_mutex_unlock(&platCtx->capture_mutex);
+                miniav_log(MINIAV_LOG_LEVEL_INFO,
+                           "CoreAudio: ScreenCaptureKit system-audio capture started successfully.");
+                return MINIAV_SUCCESS;
+            }
+            // SCK failed — undo the optimistic flag and try a virtual device as
+            // a last resort (mirrors the tap path's fallback). Tear down any
+            // abandoned SCK chain FIRST: on a timeout coreaudio_sck_start
+            // leaves the stream/delegate live (to be drained by teardown), and
+            // if we switch to a virtual device without draining it, (a) stop
+            // would mistake the leftover state for an SCK capture and never
+            // stop the virtual device, and (b) the orphaned stream's
+            // didStopWithError could fire a spurious lost_cb against the live
+            // virtual-device capture.
+            platCtx->is_capturing = false;
+            coreaudio_sck_teardown(platCtx);
+            platCtx->capture_mode = CAPTURE_MODE_NONE;
+            miniav_log(MINIAV_LOG_LEVEL_WARN,
+                       "CoreAudio: SCK system-audio start failed (%d), trying virtual device.",
+                       (int)sck_res);
+            platCtx->virtual_device_id = FindVirtualAudioDevice();
+            if (platCtx->virtual_device_id != kAudioObjectUnknown) {
+                platCtx->capture_mode = CAPTURE_MODE_VIRTUAL_DEVICE;
+            } else {
+                pthread_mutex_unlock(&platCtx->capture_mutex);
+                return sck_res;
+            }
+        }
+    }
+#endif // HAS_SCK_AUDIO_API
+
     // Virtual device capture (primary if tap not available/supported, or fallback if tap failed)
     if (platCtx->capture_mode == CAPTURE_MODE_VIRTUAL_DEVICE) {
         miniav_log(MINIAV_LOG_LEVEL_INFO, "CoreAudio: Starting virtual device capture.");
@@ -1428,14 +2157,46 @@ static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, Mini
             pthread_mutex_unlock(&platCtx->capture_mutex); return MINIAV_ERROR_SYSTEM_CALL_FAILED;
         }
 
+        // Initialize FIRST so the unit commits its real client format, then
+        // read that format back BEFORE sizing the render buffer and BEFORE
+        // the callback can run — sizing from the requested format risked an
+        // undersized buffer if AUHAL coerced the format, and publishing
+        // stream_format after start raced the realtime callback.
+        status = AudioUnitInitialize(platCtx->input_unit);
+        if (status != noErr) {
+            miniav_log(MINIAV_LOG_LEVEL_ERROR, "CoreAudio: Failed to initialize AudioUnit: %d", status);
+            AudioComponentInstanceDispose(platCtx->input_unit); platCtx->input_unit = NULL;
+            pthread_mutex_unlock(&platCtx->capture_mutex); return MINIAV_ERROR_SYSTEM_CALL_FAILED;
+        }
+
+        // Read back the format the AudioUnit will actually deliver into the
+        // render callback (output scope of the input element) so reported
+        // buffers — and the buffer allocation below — describe reality
+        // rather than the request.
+        {
+            AudioStreamBasicDescription unit_fmt = {0};
+            UInt32 fmt_size = sizeof(unit_fmt);
+            if (AudioUnitGetProperty(platCtx->input_unit, kAudioUnitProperty_StreamFormat,
+                                     kAudioUnitScope_Output, 1, &unit_fmt, &fmt_size) == noErr &&
+                unit_fmt.mSampleRate > 0 && unit_fmt.mBytesPerFrame > 0) {
+                platCtx->stream_format = unit_fmt;
+                miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                           "CoreAudio: Virtual-device negotiated format %.0fHz %uch %ubytes/frame.",
+                           unit_fmt.mSampleRate,
+                           (unsigned)unit_fmt.mChannelsPerFrame,
+                           (unsigned)unit_fmt.mBytesPerFrame);
+            }
+        }
+
         MiniAVAudioInfo configured_format;
         coreaudio_get_configured_format(ctx, &configured_format); // Get currently configured format for num_frames
         UInt32 bufferSizeFrames = configured_format.num_frames > 0 ? configured_format.num_frames : 1024;
         UInt32 bufferSizeBytes = bufferSizeFrames * platCtx->stream_format.mBytesPerFrame;
-        
+
         platCtx->audio_buffer_list = (AudioBufferList*)miniav_calloc(1, offsetof(AudioBufferList, mBuffers) + (sizeof(AudioBuffer) * 1));
         if (!platCtx->audio_buffer_list) {
              miniav_log(MINIAV_LOG_LEVEL_ERROR, "CoreAudio: Failed to allocate audio buffer list.");
+             AudioUnitUninitialize(platCtx->input_unit);
              AudioComponentInstanceDispose(platCtx->input_unit); platCtx->input_unit = NULL;
              pthread_mutex_unlock(&platCtx->capture_mutex); return MINIAV_ERROR_OUT_OF_MEMORY;
         }
@@ -1447,17 +2208,9 @@ static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, Mini
         if (!platCtx->audio_buffer_list->mBuffers[0].mData) {
             miniav_log(MINIAV_LOG_LEVEL_ERROR, "CoreAudio: Failed to allocate audio buffer data.");
             miniav_free(platCtx->audio_buffer_list); platCtx->audio_buffer_list = NULL;
+            AudioUnitUninitialize(platCtx->input_unit);
             AudioComponentInstanceDispose(platCtx->input_unit); platCtx->input_unit = NULL;
             pthread_mutex_unlock(&platCtx->capture_mutex); return MINIAV_ERROR_OUT_OF_MEMORY;
-        }
-
-        status = AudioUnitInitialize(platCtx->input_unit);
-        if (status != noErr) {
-            miniav_log(MINIAV_LOG_LEVEL_ERROR, "CoreAudio: Failed to initialize AudioUnit: %d", status);
-            miniav_free(platCtx->audio_buffer_list->mBuffers[0].mData);
-            miniav_free(platCtx->audio_buffer_list); platCtx->audio_buffer_list = NULL;
-            AudioComponentInstanceDispose(platCtx->input_unit); platCtx->input_unit = NULL;
-            pthread_mutex_unlock(&platCtx->capture_mutex); return MINIAV_ERROR_SYSTEM_CALL_FAILED;
         }
 
         status = AudioOutputUnitStart(platCtx->input_unit);
@@ -1469,10 +2222,13 @@ static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, Mini
             AudioComponentInstanceDispose(platCtx->input_unit); platCtx->input_unit = NULL;
             pthread_mutex_unlock(&platCtx->capture_mutex); return MINIAV_ERROR_SYSTEM_CALL_FAILED;
         }
-        
+
         platCtx->is_capturing = true;
         ctx->is_running = true;
         pthread_mutex_unlock(&platCtx->capture_mutex);
+        // Outside the mutex: registration talks to coreaudiod and must not
+        // extend the critical section.
+        coreaudio_install_alive_listener(platCtx, platCtx->virtual_device_id);
         miniav_log(MINIAV_LOG_LEVEL_INFO, "CoreAudio: Virtual device capture started successfully.");
         return MINIAV_SUCCESS;
     }
@@ -1485,33 +2241,63 @@ static MiniAVResultCode coreaudio_start_capture(MiniAVLoopbackContext* ctx, Mini
 
 static MiniAVResultCode coreaudio_stop_capture(MiniAVLoopbackContext* ctx) {
     if (!ctx || !ctx->platform_ctx) return MINIAV_ERROR_INVALID_ARG;
-    
+
     CoreAudioLoopbackPlatformContext* platCtx = (CoreAudioLoopbackPlatformContext*)ctx->platform_ctx;
-    
+
+#if HAS_SCK_AUDIO_API
+    // Tear down SCK BEFORE the is_capturing early-out: a timed-out start can
+    // leave sck_start_pending true while is_capturing is still false, and the
+    // teardown must drain that abandoned chain. coreaudio_sck_teardown runs
+    // outside the capture_mutex (it stops the stream and drains its own audio
+    // queue). Guarded by @available since it touches SCK objects.
+    if (@available(macOS 13.0, *)) {
+        // Drain ANY abandoned SCK chain (e.g. a timed-out start that fell back
+        // to a virtual device leaves stream/pending/queue live) unconditionally
+        // — but only RETURN early when SCK is the ACTUAL active capture. Falling
+        // back to a virtual device with leftover SCK state must NOT skip the
+        // virtual-device stop below.
+        bool sck_is_active = (platCtx->capture_mode == CAPTURE_MODE_SCK_AUDIO);
+        bool has_sck_state = platCtx->sck_stream || platCtx->sck_start_pending ||
+                             platCtx->sck_audio_queue;
+        if (sck_is_active || has_sck_state) {
+            coreaudio_sck_teardown(platCtx);
+        }
+        if (sck_is_active) {
+            platCtx->is_capturing = false;
+            ctx->is_running = false;
+            miniav_log(MINIAV_LOG_LEVEL_INFO,
+                       "CoreAudio: SCK system-audio capture stopped.");
+            return MINIAV_SUCCESS;
+        }
+    }
+#endif
+
     if (!platCtx->is_capturing) {
         return MINIAV_SUCCESS;
     }
-    
+
     pthread_mutex_lock(&platCtx->capture_mutex);
     platCtx->should_stop_capture = true;
     platCtx->is_capturing = false;
     ctx->is_running = false;
-    
+
+    coreaudio_remove_alive_listener(platCtx);
+
     #if HAS_AUDIO_TAP_API
     // Stop Audio Tap
     if (platCtx->io_proc_id && platCtx->aggregated_id != kAudioObjectUnknown) {
         AudioDeviceStop(platCtx->aggregated_id, platCtx->io_proc_id);
     }
     #endif
-    
+
     // Stop AudioUnit
     if (platCtx->input_unit) {
         AudioOutputUnitStop(platCtx->input_unit);
         AudioUnitUninitialize(platCtx->input_unit);
     }
-    
+
     pthread_mutex_unlock(&platCtx->capture_mutex);
-    
+
     miniav_log(MINIAV_LOG_LEVEL_INFO, "CoreAudio: Loopback capture stopped");
     return MINIAV_SUCCESS;
 }
@@ -1541,7 +2327,7 @@ const LoopbackContextInternalOps g_loopback_ops_macos_coreaudio = {
     .init_platform = coreaudio_init_platform,
     .destroy_platform = coreaudio_destroy_platform,
     .enumerate_targets_platform = coreaudio_enumerate_targets,
-    .get_supported_formats = NULL, // Not implemented for now
+    .get_supported_formats = coreaudio_get_supported_formats,
     .get_default_format = coreaudio_get_default_format,
     .get_default_format_platform = coreaudio_get_default_format,
     .configure_loopback = coreaudio_configure_loopback,

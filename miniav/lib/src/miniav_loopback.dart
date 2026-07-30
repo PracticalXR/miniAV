@@ -20,6 +20,12 @@ class MiniLoopback {
     final context = await _platform.createContext();
     return MiniLoopbackContext._(context);
   }
+
+  /// Subscribe to loopback target add/remove notifications.
+  /// Returns a disposer that must be called to unsubscribe.
+  static void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => _platform.addDeviceChangeListener(listener);
 }
 
 /// Loopback capture context for configuration and capture operations
@@ -48,4 +54,11 @@ class MiniLoopbackContext {
 
   /// Destroy the context and release resources
   Future<void> destroy() => _context.destroy();
+
+  /// Subscribe to a context-lost notification (rendering endpoint removed,
+  /// process target ended, etc.). Fired from a capture thread; do NOT call
+  /// [destroy] synchronously from inside the listener. Returns a disposer
+  /// that must be called to unsubscribe.
+  void Function() addLostListener(MiniAVContextLostListener listener) =>
+      _context.addLostListener(listener);
 }

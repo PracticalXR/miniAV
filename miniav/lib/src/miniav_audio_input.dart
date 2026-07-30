@@ -24,6 +24,12 @@ class MiniAudioInput {
     final context = await _platform.createContext();
     return MiniAudioInputContext._(context);
   }
+
+  /// Subscribe to audio input device add/remove notifications.
+  /// Returns a disposer that must be called to unsubscribe.
+  static void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => _platform.addDeviceChangeListener(listener);
 }
 
 /// Audio input capture context for configuration and capture operations
@@ -52,4 +58,11 @@ class MiniAudioInputContext {
 
   /// Destroy the context and release resources
   Future<void> destroy() => _context.destroy();
+
+  /// Subscribe to a context-lost notification (microphone unplugged, etc.).
+  /// Fired from a capture thread; do NOT call [destroy] synchronously from
+  /// inside the listener. Returns a disposer that must be called to
+  /// unsubscribe.
+  void Function() addLostListener(MiniAVContextLostListener listener) =>
+      _context.addLostListener(listener);
 }

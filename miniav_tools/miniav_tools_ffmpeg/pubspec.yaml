@@ -1,0 +1,27 @@
+name: miniav_tools_ffmpeg
+description: FFmpeg-backed codecs/muxers for miniav_tools (libavcodec/libavformat).
+version: 0.5.2
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  miniav_tools_platform_interface: 0.5.2
+  miniav_platform_interface: ^0.5.10
+  minigpu_platform_interface: ^1.5.7
+  ffi: ^2.1.4
+  meta: ^1.16.0
+  http: ^1.2.0
+  archive: ^4.0.0
+  path: ^1.9.0
+  crypto: ^3.0.3
+  # native_assets build hook deps (used by hook/build.dart)
+  code_assets: ^1.2.1
+  hooks: ^2.0.2
+  logging: ^1.2.0
+  native_toolchain_cmake: ^0.2.7
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0
+  ffigen: ^20.1.1
+  benchmark_harness: ^2.3.1

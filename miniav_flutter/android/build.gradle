@@ -1,0 +1,80 @@
+// Android Gradle plugin scaffold for miniav_flutter.
+//
+// This provides the MediaProjection consent piece described in
+// miniav_ffi/miniav_c/MOBILE_PLATFORM_SPEC.md §3 (A.3) and §6 ("flutter-consent"):
+// a Kotlin MethodChannel helper that runs the Android screen-capture consent
+// Activity round-trip, starts the required mediaProjection-typed foreground
+// service, and hands the resulting MediaProjection to the pure-FFI native
+// layer through a tiny JNI shim (src/main/cpp/miniav_flutter_jni.c).
+//
+// Groovy is used (the safe Flutter-plugin default) and the build is kept as
+// AGP-version-agnostic as possible.
+
+group = 'com.practicalxr.miniav_flutter'
+version = '1.0'
+
+buildscript {
+    ext.kotlin_version = '1.9.24'
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // AGP is provided by the consuming app's classpath; we avoid pinning a
+        // specific version here so this plugin stays AGP-version-agnostic.
+        classpath 'com.android.tools.build:gradle:8.1.0'
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlin_version"
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+apply plugin: 'kotlin-android'
+
+android {
+    // namespace is required by AGP 7+. On older AGP that ignores it, the
+    // package in AndroidManifest.xml is the fallback (kept identical).
+    namespace = 'com.practicalxr.miniav_flutter'
+
+    compileSdk = 34
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_11
+        targetCompatibility = JavaVersion.VERSION_11
+    }
+
+    kotlinOptions {
+        jvmTarget = '11'
+    }
+
+    defaultConfig {
+        // Matches the native link floor (minSdk 24). Feature gating in the
+        // Kotlin code is done at runtime via Build.VERSION.SDK_INT.
+        minSdk = 24
+    }
+
+    // Tiny JNI shim that resolves MiniAV_Screen_SetAndroidMediaProjection from
+    // libminiav_c.so (built by miniav_ffi's native-assets hook) and forwards
+    // the app-obtained MediaProjection global ref + JavaVM* to it.
+    externalNativeBuild {
+        cmake {
+            path = 'src/main/cpp/CMakeLists.txt'
+        }
+    }
+
+    // Some AGP versions need an explicit sourceSets block for Kotlin under
+    // src/main/kotlin; declared defensively.
+    sourceSets {
+        main.java.srcDirs += 'src/main/kotlin'
+    }
+}
+
+dependencies {
+    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+}

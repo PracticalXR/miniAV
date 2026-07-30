@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:miniav/miniav.dart';
+import 'package:minigpu_view/minigpu_view.dart';
 
 void main() {
   runApp(const MiniAVBenchmarkApp());
@@ -55,6 +56,43 @@ class StreamConfiguration {
     selectedFormat = null;
     availableFormats.clear();
     error = null;
+  }
+}
+
+class InputStats {
+  int keyboardEvents = 0;
+  int mouseEvents = 0;
+  int gamepadEvents = 0;
+  bool isActive = false;
+  bool isStarting = false;
+  bool isStopping = false;
+  MiniAVKeyboardEvent? lastKeyboard;
+  MiniAVMouseEvent? lastMouse;
+  MiniAVGamepadEvent? lastGamepad;
+  MiniAVGamepadEvent? prevGamepad; // for diffing
+  final List<String> eventLog = [];
+  DateTime startTime = DateTime.now();
+  int get totalEvents => keyboardEvents + mouseEvents + gamepadEvents;
+  double get eventsPerSecond {
+    final elapsed = DateTime.now().difference(startTime).inMicroseconds / 1e6;
+    return elapsed > 0 ? totalEvents / elapsed : 0;
+  }
+
+  void reset() {
+    keyboardEvents = 0;
+    mouseEvents = 0;
+    gamepadEvents = 0;
+    lastKeyboard = null;
+    lastMouse = null;
+    lastGamepad = null;
+    prevGamepad = null;
+    eventLog.clear();
+    startTime = DateTime.now();
+  }
+
+  void addLog(String msg) {
+    eventLog.add(msg);
+    if (eventLog.length > 50) eventLog.removeAt(0);
   }
 }
 
@@ -147,9 +185,22 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
   Timer? _uiUpdateTimer;
   bool _showConfig = false;
 
+  // Input capture state
+  final InputStats _inputStats = InputStats();
+  MiniInputContext? _inputContext;
+  bool _inputKeyboard = true;
+  bool _inputMouse = true;
+  bool _inputGamepad = true;
+  int _mouseThrottleHz = 60;
+
   // Preview state
   final ValueNotifier<ui.Image?> _cameraPreview = ValueNotifier(null);
   final ValueNotifier<ui.Image?> _screenPreview = ValueNotifier(null);
+  // GPU zero-copy preview controllers (Windows D3D11 / Web GPUCanvasContext).
+  final MinigpuPreviewController _cameraPreviewCtrl =
+      MinigpuPreviewController();
+  final MinigpuPreviewController _screenPreviewCtrl =
+      MinigpuPreviewController();
   bool _buildingCameraImage = false;
   bool _buildingScreenImage = false;
   int _cameraFrameSkip = 0;
@@ -179,10 +230,13 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
   void dispose() {
     _uiUpdateTimer?.cancel();
     _stopAllStreams();
+    _stopInputCapture();
     _cameraPreview.value?.dispose();
     _screenPreview.value?.dispose();
     _cameraPreview.dispose();
     _screenPreview.dispose();
+    _cameraPreviewCtrl.dispose();
+    _screenPreviewCtrl.dispose();
     super.dispose();
   }
 
@@ -257,39 +311,12 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
           formats = await MiniCamera.getSupportedFormats(
             config.selectedDeviceId!,
           );
-          // Force CPU output preference if possible by cloning objects (if plugin respects it)
-          formats = formats.map((f) {
-            if (f is MiniAVVideoInfo &&
-                f.outputPreference != MiniAVOutputPreference.cpu) {
-              return MiniAVVideoInfo(
-                width: f.width,
-                height: f.height,
-                pixelFormat: f.pixelFormat,
-                frameRateNumerator: f.frameRateNumerator,
-                frameRateDenominator: f.frameRateDenominator,
-                outputPreference: MiniAVOutputPreference.cpu,
-              );
-            }
-            return f;
-          }).toList();
           break;
         case 'screen':
           final result = await MiniScreen.getDefaultFormats(
             config.selectedDeviceId!,
           );
-          // result.$1 is video format
-          final f = result.$1;
-          final cpuF = (f.outputPreference == MiniAVOutputPreference.cpu)
-              ? f
-              : MiniAVVideoInfo(
-                  width: f.width,
-                  height: f.height,
-                  pixelFormat: f.pixelFormat,
-                  frameRateNumerator: f.frameRateNumerator,
-                  frameRateDenominator: f.frameRateDenominator,
-                  outputPreference: MiniAVOutputPreference.cpu,
-                );
-          formats = [cpuF];
+          formats = [result.$1];
           break;
         case 'audioInput':
           final defaultFormat = await MiniAudioInput.getDefaultFormat(
@@ -327,6 +354,7 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
       _toggleStream('screen'),
       _toggleStream('audioInput'),
       _toggleStream('loopback'),
+      _startInputCapture(),
     ]);
   }
 
@@ -335,6 +363,7 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
     for (final k in _stats.keys) {
       if (_stats[k]!.isActive) futures.add(_toggleStream(k));
     }
+    if (_inputStats.isActive) futures.add(_stopInputCapture());
     await Future.wait(futures);
   }
 
@@ -440,6 +469,7 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
           streamKey: 'camera',
           buffer: buffer,
           preview: _cameraPreview,
+          previewController: _cameraPreviewCtrl,
           buildingFlag: () => _buildingCameraImage,
           setBuildingFlag: (v) => _buildingCameraImage = v,
           frameSkipCounter: () => _cameraFrameSkip++,
@@ -474,6 +504,7 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
           streamKey: 'screen',
           buffer: buffer,
           preview: _screenPreview,
+          previewController: _screenPreviewCtrl,
           buildingFlag: () => _buildingScreenImage,
           setBuildingFlag: (v) => _buildingScreenImage = v,
           frameSkipCounter: () => _screenFrameSkip++,
@@ -526,10 +557,194 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
     });
   }
 
+  // --- Input Capture ---
+
+  Future<void> _startInputCapture() async {
+    if (_inputStats.isActive) return;
+    setState(() => _inputStats.isStarting = true);
+    try {
+      final ctx = await MiniInput.createContext();
+      int inputTypes = 0;
+      if (_inputKeyboard) inputTypes |= MiniAVInputType.keyboard.value;
+      if (_inputMouse) inputTypes |= MiniAVInputType.mouse.value;
+      if (_inputGamepad) inputTypes |= MiniAVInputType.gamepad.value;
+      await ctx.configure(
+        MiniAVInputConfig(
+          inputTypes: inputTypes,
+          mouseThrottleHz: _mouseThrottleHz,
+          gamepadPollHz: 60,
+        ),
+      );
+      await ctx.startCapture(
+        onKeyboard: (event, _) {
+          _inputStats.keyboardEvents++;
+          _inputStats.lastKeyboard = event;
+          final action = event.action == MiniAVKeyAction.down ? 'DN' : 'UP';
+          _inputStats.addLog(
+            'KEY $action vk=${event.keyCode} sc=${event.scanCode}',
+          );
+        },
+        onMouse: (event, _) {
+          _inputStats.mouseEvents++;
+          _inputStats.lastMouse = event;
+          final action = event.action.name;
+          _inputStats.addLog(
+            'MOUSE $action (${event.x},${event.y}) btn=${event.button.name}',
+          );
+        },
+        onGamepad: (event, _) {
+          _inputStats.gamepadEvents++;
+          final prev = _inputStats.prevGamepad;
+          final logs = _describeGamepadChanges(prev, event);
+          for (final log in logs) {
+            _inputStats.addLog(log);
+          }
+          _inputStats.prevGamepad = _inputStats.lastGamepad;
+          _inputStats.lastGamepad = event;
+        },
+      );
+      _inputContext = ctx;
+      _inputStats.reset();
+      _inputStats.isActive = true;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to start input capture: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      setState(() => _inputStats.isStarting = false);
+    }
+  }
+
+  Future<void> _stopInputCapture() async {
+    if (!_inputStats.isActive && _inputContext == null) return;
+    setState(() => _inputStats.isStopping = true);
+    try {
+      await _inputContext?.stopCapture();
+      await _inputContext?.destroy();
+    } catch (_) {}
+    _inputContext = null;
+    _inputStats.isActive = false;
+    setState(() => _inputStats.isStopping = false);
+  }
+
+  Future<void> _toggleInputCapture() async {
+    if (_inputStats.isActive) {
+      await _stopInputCapture();
+    } else {
+      await _startInputCapture();
+    }
+  }
+
+  // --- XInput button name map ---
+  static const Map<int, String> _xinputButtons = {
+    0x0001: 'DPad-Up',
+    0x0002: 'DPad-Down',
+    0x0004: 'DPad-Left',
+    0x0008: 'DPad-Right',
+    0x0010: 'Start',
+    0x0020: 'Back',
+    0x0040: 'L-Stick',
+    0x0080: 'R-Stick',
+    0x0100: 'LB',
+    0x0200: 'RB',
+    0x1000: 'A',
+    0x2000: 'B',
+    0x4000: 'X',
+    0x8000: 'Y',
+  };
+
+  static const int _stickDeadzone = 5000;
+  static const int _triggerDeadzone = 10;
+
+  String _buttonNames(int bitmask) {
+    if (bitmask == 0) return 'none';
+    final names = <String>[];
+    for (final entry in _xinputButtons.entries) {
+      if (bitmask & entry.key != 0) names.add(entry.value);
+    }
+    return names.isEmpty ? '0x${bitmask.toRadixString(16)}' : names.join('+');
+  }
+
+  List<String> _describeGamepadChanges(
+    MiniAVGamepadEvent? prev,
+    MiniAVGamepadEvent cur,
+  ) {
+    final logs = <String>[];
+    final pad = 'PAD[${cur.gamepadIndex}]';
+
+    if (prev == null) {
+      // First event — show full state
+      if (cur.connected) {
+        logs.add('$pad connected');
+      }
+      if (cur.buttons != 0) {
+        logs.add('$pad BTN ${_buttonNames(cur.buttons)}');
+      }
+      return logs;
+    }
+
+    // Connection change
+    if (cur.connected != prev.connected) {
+      logs.add('$pad ${cur.connected ? "connected" : "disconnected"}');
+      if (!cur.connected) return logs;
+    }
+
+    // Button press/release diff
+    final pressed = cur.buttons & ~prev.buttons;
+    final released = ~cur.buttons & prev.buttons;
+    if (pressed != 0) logs.add('$pad PRESS ${_buttonNames(pressed)}');
+    if (released != 0) logs.add('$pad RELEASE ${_buttonNames(released)}');
+
+    // Trigger changes (analog 0-255)
+    if ((cur.leftTrigger - prev.leftTrigger).abs() > _triggerDeadzone) {
+      logs.add('$pad LT=${cur.leftTrigger}');
+    }
+    if ((cur.rightTrigger - prev.rightTrigger).abs() > _triggerDeadzone) {
+      logs.add('$pad RT=${cur.rightTrigger}');
+    }
+
+    // Stick changes (only when exceeding deadzone)
+    if (_stickChanged(
+      prev.leftStickX,
+      prev.leftStickY,
+      cur.leftStickX,
+      cur.leftStickY,
+    )) {
+      logs.add('$pad L-Stick(${cur.leftStickX},${cur.leftStickY})');
+    }
+    if (_stickChanged(
+      prev.rightStickX,
+      prev.rightStickY,
+      cur.rightStickX,
+      cur.rightStickY,
+    )) {
+      logs.add('$pad R-Stick(${cur.rightStickX},${cur.rightStickY})');
+    }
+
+    return logs;
+  }
+
+  bool _stickChanged(int prevX, int prevY, int curX, int curY) {
+    // Only log if the stick crossed the deadzone threshold or moved significantly
+    final prevMag = sqrt(prevX * prevX + prevY * prevY);
+    final curMag = sqrt(curX * curX + curY * curY);
+    // Report if crossing deadzone boundary or if already past deadzone and changed significantly
+    if (prevMag < _stickDeadzone && curMag < _stickDeadzone) return false;
+    final dx = (curX - prevX).abs();
+    final dy = (curY - prevY).abs();
+    return dx > 2000 || dy > 2000;
+  }
+
   void _trySchedulePreview({
     required String streamKey,
     required MiniAVBuffer buffer,
     required ValueNotifier<ui.Image?> preview,
+    MinigpuPreviewController? previewController,
     required bool Function() buildingFlag,
     required void Function(bool) setBuildingFlag,
     required int Function() frameSkipCounter,
@@ -537,6 +752,19 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
     if (buildingFlag()) return;
     final skipIndex = frameSkipCounter();
     if ((skipIndex & 1) == 1) return;
+
+    // GPU zero-copy path (Windows D3D11 / other native GPU handles).
+    if (buffer.contentType != MiniAVBufferContentType.cpu &&
+        previewController != null) {
+      final source = buffer.asPreviewSource();
+      if (source != null) {
+        previewController.present(source).catchError((e) {
+          _stats[streamKey]!.lastPreviewError = 'GPU preview error: $e';
+        });
+        return;
+      }
+      // Unknown GPU handle type — fall through to CPU path.
+    }
 
     if (buffer.contentType != MiniAVBufferContentType.cpu) {
       _stats[streamKey]!.lastPreviewError ??=
@@ -935,7 +1163,9 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
 
   @override
   Widget build(BuildContext context) {
-    final activeStreams = _stats.values.where((s) => s.isActive).length;
+    final activeStreams =
+        _stats.values.where((s) => s.isActive).length +
+        (_inputStats.isActive ? 1 : 0);
     final hasActiveStreams = activeStreams > 0;
     return Scaffold(
       appBar: AppBar(
@@ -979,10 +1209,13 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
                   mainAxisSpacing: 16,
                   childAspectRatio: 0.78,
                 ),
-                itemCount: _stats.length,
+                itemCount: _stats.length + 1, // +1 for input card
                 itemBuilder: (context, index) {
-                  final entry = _stats.entries.elementAt(index);
-                  return _buildStreamStatsCard(entry.key, entry.value);
+                  if (index < _stats.length) {
+                    final entry = _stats.entries.elementAt(index);
+                    return _buildStreamStatsCard(entry.key, entry.value);
+                  }
+                  return _buildInputCard();
                 },
               ),
             ),
@@ -1095,6 +1328,11 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
                             (d) => d.deviceId == v,
                           );
                         });
+                        print(
+                          'Selected $key device: ${cfg.selectedDevice!.name}',
+                        );
+                        print(v);
+                        print(cfg.availableDevices);
                         _loadFormats(key);
                       },
               ),
@@ -1169,7 +1407,9 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
       0.0,
       (sum, s) => sum + s.bandwidth,
     );
-    final active = _stats.values.where((s) => s.isActive).length;
+    final active =
+        _stats.values.where((s) => s.isActive).length +
+        (_inputStats.isActive ? 1 : 0);
     final avgLatency =
         _stats.values
             .where((s) => s.isActive && s.latencyHistory.isNotEmpty)
@@ -1213,7 +1453,7 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceAround,
               children: [
-                _buildStatItem('Active Streams', '$active/4', Icons.stream),
+                _buildStatItem('Active Streams', '$active/5', Icons.stream),
                 _buildStatItem(
                   'Total Frames',
                   _formatNumber(totalFrames),
@@ -1248,31 +1488,7 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
     final isLoading = stats.isStarting || stats.isStopping;
     final canStart = cfg.selectedDevice != null && cfg.selectedFormat != null;
     final preview = (key == 'camera' || key == 'screen')
-        ? ValueListenableBuilder<ui.Image?>(
-            valueListenable: key == 'camera' ? _cameraPreview : _screenPreview,
-            builder: (_, img, __) {
-              if (!stats.isActive) {
-                return _previewContainer(
-                  child: Text(
-                    'Idle',
-                    style: TextStyle(fontSize: 10, color: Colors.grey[500]),
-                  ),
-                );
-              }
-              if (img == null) {
-                return _previewContainer(
-                  child: Text(
-                    stats.lastPreviewError ?? 'Waiting frame...',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 9, color: Colors.grey[500]),
-                  ),
-                );
-              }
-              return _previewContainer(
-                child: RawImage(image: img, fit: BoxFit.cover),
-              );
-            },
-          )
+        ? _buildPreviewWidget(key, stats)
         : const SizedBox.shrink();
 
     return Card(
@@ -1451,6 +1667,269 @@ class _BenchmarkDashboardState extends State<BenchmarkDashboard> {
         borderRadius: BorderRadius.circular(6),
         child: ColoredBox(color: Colors.black, child: child),
       ),
+    );
+  }
+
+  /// Builds the preview widget for camera/screen streams.
+  ///
+  /// Shows [MiniavGpuPreview] when a GPU frame has been presented (Windows
+  /// D3D11 zero-copy path); otherwise falls back to the CPU [RawImage] path.
+  Widget _buildPreviewWidget(String key, StreamStats stats) {
+    final ctrl = key == 'camera' ? _cameraPreviewCtrl : _screenPreviewCtrl;
+    final cpuPreview = key == 'camera' ? _cameraPreview : _screenPreview;
+
+    if (!stats.isActive) {
+      return _previewContainer(
+        child: Text(
+          'Idle',
+          style: TextStyle(fontSize: 10, color: Colors.grey[500]),
+        ),
+      );
+    }
+
+    // GPU path: controller has a registered textureId.
+    if (ctrl.textureId != null) {
+      return _previewContainer(
+        child: AnimatedBuilder(
+          animation: ctrl,
+          builder: (_, __) => MiniavGpuPreview(controller: ctrl),
+        ),
+      );
+    }
+
+    // CPU fallback path.
+    return ValueListenableBuilder<ui.Image?>(
+      valueListenable: cpuPreview,
+      builder: (_, img, __) {
+        if (img == null) {
+          return _previewContainer(
+            child: Text(
+              stats.lastPreviewError ?? 'Waiting frame...',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 9, color: Colors.grey[500]),
+            ),
+          );
+        }
+        return _previewContainer(
+          child: RawImage(image: img, fit: BoxFit.cover),
+        );
+      },
+    );
+  }
+
+  Widget _buildInputCard() {
+    final s = _inputStats;
+    final isLoading = s.isStarting || s.isStopping;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                const Text('🎮', style: TextStyle(fontSize: 20)),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Input Capture',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                      Text(
+                        'Keyboard / Mouse / Gamepad',
+                        style: TextStyle(fontSize: 9, color: Colors.grey),
+                      ),
+                    ],
+                  ),
+                ),
+                SizedBox(
+                  width: 32,
+                  height: 32,
+                  child: isLoading
+                      ? const Padding(
+                          padding: EdgeInsets.all(6),
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : IconButton(
+                          padding: EdgeInsets.zero,
+                          onPressed: _toggleInputCapture,
+                          icon: Icon(
+                            s.isActive ? Icons.stop : Icons.play_arrow,
+                            size: 16,
+                            color: s.isActive ? Colors.red : Colors.green,
+                          ),
+                        ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            // Config toggles (only when stopped)
+            if (!s.isActive) ...[
+              Row(
+                children: [
+                  _inputToggle(
+                    'KB',
+                    _inputKeyboard,
+                    (v) => setState(() => _inputKeyboard = v),
+                  ),
+                  const SizedBox(width: 6),
+                  _inputToggle(
+                    'Mouse',
+                    _inputMouse,
+                    (v) => setState(() => _inputMouse = v),
+                  ),
+                  const SizedBox(width: 6),
+                  _inputToggle(
+                    'Pad',
+                    _inputGamepad,
+                    (v) => setState(() => _inputGamepad = v),
+                  ),
+                  const Spacer(),
+                  Text(
+                    '${_mouseThrottleHz}Hz',
+                    style: const TextStyle(fontSize: 9, color: Colors.grey),
+                  ),
+                  SizedBox(
+                    width: 80,
+                    child: Slider(
+                      value: _mouseThrottleHz.toDouble(),
+                      min: 0,
+                      max: 240,
+                      divisions: 8,
+                      onChanged: (v) =>
+                          setState(() => _mouseThrottleHz = v.round()),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+            ],
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 8),
+              decoration: BoxDecoration(
+                color: s.isActive
+                    ? Colors.green.withOpacity(0.2)
+                    : isLoading
+                    ? Colors.orange.withOpacity(0.2)
+                    : Colors.grey.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(
+                  color: s.isActive
+                      ? Colors.green
+                      : isLoading
+                      ? Colors.orange
+                      : Colors.grey,
+                  width: 1,
+                ),
+              ),
+              child: Text(
+                s.isActive
+                    ? 'CAPTURING'
+                    : s.isStarting
+                    ? 'STARTING...'
+                    : s.isStopping
+                    ? 'STOPPING...'
+                    : 'READY',
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: FontWeight.bold,
+                  color: s.isActive
+                      ? Colors.green
+                      : isLoading
+                      ? Colors.orange
+                      : Colors.grey,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            const SizedBox(height: 6),
+            // Stats
+            _buildMetricRow('Total Events', '${s.totalEvents}'),
+            _buildMetricRow('Events/sec', s.eventsPerSecond.toStringAsFixed(1)),
+            _buildMetricRow('Keyboard', '${s.keyboardEvents}'),
+            _buildMetricRow('Mouse', '${s.mouseEvents}'),
+            _buildMetricRow('Gamepad', '${s.gamepadEvents}'),
+            if (s.lastKeyboard != null)
+              _buildMetricRow(
+                'Last Key',
+                'vk=${s.lastKeyboard!.keyCode} ${s.lastKeyboard!.action.name}',
+              ),
+            if (s.lastMouse != null)
+              _buildMetricRow(
+                'Last Mouse',
+                '(${s.lastMouse!.x},${s.lastMouse!.y}) ${s.lastMouse!.action.name}',
+              ),
+            if (s.lastGamepad != null) ...[
+              _buildMetricRow('Buttons', _buttonNames(s.lastGamepad!.buttons)),
+              _buildMetricRow(
+                'Triggers',
+                'LT=${s.lastGamepad!.leftTrigger} RT=${s.lastGamepad!.rightTrigger}',
+              ),
+              _buildMetricRow(
+                'L-Stick',
+                '${s.lastGamepad!.leftStickX},${s.lastGamepad!.leftStickY}',
+              ),
+              _buildMetricRow(
+                'R-Stick',
+                '${s.lastGamepad!.rightStickX},${s.lastGamepad!.rightStickY}',
+              ),
+            ],
+            const SizedBox(height: 4),
+            // Event log
+            Expanded(
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: ListView.builder(
+                  reverse: true,
+                  itemCount: s.eventLog.length,
+                  itemBuilder: (_, i) {
+                    final line = s.eventLog[s.eventLog.length - 1 - i];
+                    return Text(
+                      line,
+                      style: const TextStyle(
+                        fontSize: 8,
+                        fontFamily: 'monospace',
+                        color: Colors.grey,
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _inputToggle(String label, bool value, ValueChanged<bool> onChanged) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 18,
+          height: 18,
+          child: Checkbox(
+            value: value,
+            onChanged: (v) => onChanged(v ?? false),
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          ),
+        ),
+        const SizedBox(width: 2),
+        Text(label, style: const TextStyle(fontSize: 9)),
+      ],
     );
   }
 

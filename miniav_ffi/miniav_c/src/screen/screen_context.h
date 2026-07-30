@@ -68,6 +68,14 @@ typedef struct MiniAVScreenContext {
   MiniAVCaptureType capture_target_type; // DISPLAY, WINDOW, REGION
 
   bool capture_audio_requested; // Whether the user requested audio capture
+  bool capture_cursor; // Draw the mouse cursor into frames (default false).
+                       // Set via MiniAV_Screen_SetCaptureCursor before
+                       // configure; each backend reads it when building its
+                       // capture session.
+
+  // Set via MiniAV_Screen_SetContextLostCallback. May be NULL.
+  MiniAVContextLostCallback lost_cb;
+  void *lost_cb_user_data;
 
 } MiniAVScreenContext;
 

@@ -1,0 +1,158 @@
+# Dart/Flutter gates for the miniav_tools codec stack + player (P3.1).
+#
+# Layout note: the tracked pubspec_overrides.yaml files resolve minigpu by
+# RELATIVE PATH (../../../minigpu/...), i.e. a `minigpu` checkout SIBLING to
+# this repo. Every job therefore checks out both repos under a common parent:
+#   $GITHUB_WORKSPACE/miniAV    (this repo)
+#   $GITHUB_WORKSPACE/minigpu   (PracticalXR/minigpu)
+#
+# Toolchain: Flutter MASTER channel — the packages pin a bleeding-edge Dart SDK
+# (native-assets build hooks), matching the dev environment.
+#
+# Scope (v1, deliberately hermetic):
+#   - analyze: whole codec stack + player (errors fail; infos/warnings don't).
+#   - codecs tests (Windows): the FFmpeg-free suites. The native asset builds
+#     via the CMake build hook (MSVC on the runner). GPU byte-exact suites
+#     self-skip when Dawn can't init on the runner's adapter; container/codec
+#     fixtures are generated with the ffmpeg CLI when available (tests skip
+#     cleanly if not).
+#   - platform_interface + tools tests (pure Dart / fake backends).
+#   - web build: examples/player through dart2js (the proven web gate).
+# NOT here (yet): FFmpeg-runtime suites (BtbN download flakiness), flutter test
+# of the player on Windows (native-assets-under-flutter-test is unstable on
+# master — run locally), real-browser tests.
+name: dart-ci
+
+on:
+  push:
+    paths:
+      - "miniav_tools/**"
+      - "miniav_platform_interface/**"
+      - "miniav_ffi/**"
+      - "miniav_web/**"
+      - ".github/workflows/dart-ci.yml"
+  pull_request:
+    paths:
+      - "miniav_tools/**"
+      - "miniav_platform_interface/**"
+      - "miniav_ffi/**"
+      - "miniav_web/**"
+      - ".github/workflows/dart-ci.yml"
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: miniAV
+      - uses: actions/checkout@v4
+        with:
+          repository: PracticalXR/minigpu
+          path: minigpu
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: master
+      - name: Pub get + analyze (codec stack + player)
+        working-directory: miniAV/miniav_tools
+        run: |
+          set -e
+          for pkg in miniav_tools_platform_interface miniav_tools_codecs miniav_tools_ffmpeg miniav_tools miniav_player; do
+            echo "=== $pkg ==="
+            (cd "$pkg" && flutter pub get && dart analyze)
+          done
+
+  codecs-test-windows:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: miniAV
+      - uses: actions/checkout@v4
+        with:
+          repository: PracticalXR/minigpu
+          path: minigpu
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: master
+      - name: Generate test fixtures (ffmpeg CLI)
+        working-directory: miniAV/miniav_tools/miniav_tools_codecs/test
+        shell: bash
+        continue-on-error: true # fixture-dependent tests skip cleanly if absent
+        run: |
+          choco install ffmpeg -y --no-progress
+          export PATH="$PATH:/c/ProgramData/chocolatey/bin"
+          mkdir -p assets
+          ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=0.25 -ac 2 -ar 48000 -y assets/tone.mp3
+          ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=0.25 -ac 2 -ar 48000 -y assets/tone.flac
+          ffmpeg -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=0.25 -ac 2 -ar 48000 -c:a libvorbis -y assets/tone.ogg
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=duration=1:size=64x48:rate=10 -c:v libx264 -pix_fmt yuv420p -bf 0 -y assets/plain_tmp.mp4
+          ffmpeg -hide_banner -loglevel error -display_rotation -90 -i assets/plain_tmp.mp4 -c copy -y assets/rot90.mp4
+          rm assets/plain_tmp.mp4
+          ffmpeg -hide_banner -loglevel error -f lavfi -i testsrc=duration=1:size=64x48:rate=10 -c:v libx264 -pix_fmt yuv420p -bf 2 -g 10 -y assets/bframes.mp4
+      - name: dart test (FFmpeg-free suites; native asset via CMake hook)
+        working-directory: miniAV/miniav_tools/miniav_tools_codecs
+        shell: bash
+        run: |
+          dart pub get
+          # --concurrency=1: parallel test isolates each spin up a Dawn device;
+          # concurrent teardown can crash the VM (access violation) even when
+          # every test passes. Serialized runs are stable (dev-box verified).
+          dart test --concurrency=1 \
+            test/frame_convert_test.dart \
+            test/gpu_planar_yuv_test.dart \
+            test/framing_test.dart \
+            test/mp4_demux_test.dart \
+            test/mp4_mux_test.dart \
+            test/mp4_metadata_test.dart \
+            test/pcm_roundtrip_test.dart \
+            test/opus_encode_test.dart \
+            test/sw_audio_test.dart
+
+  pure-dart-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: miniAV
+      - uses: actions/checkout@v4
+        with:
+          repository: PracticalXR/minigpu
+          path: minigpu
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: master
+      - name: platform_interface tests (pure Dart)
+        working-directory: miniAV/miniav_tools/miniav_tools_platform_interface
+        run: |
+          dart pub get
+          dart test
+      - name: miniav_tools negotiator tests (fake backends)
+        working-directory: miniAV/miniav_tools/miniav_tools
+        run: |
+          flutter pub get
+          dart test
+
+  web-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: miniAV
+      - uses: actions/checkout@v4
+        with:
+          repository: PracticalXR/minigpu
+          path: minigpu
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: master
+      - name: flutter build web (examples/player — the web compile gate)
+        working-directory: miniAV/miniav_tools/examples/player
+        run: |
+          flutter pub get
+          flutter build web --no-tree-shake-icons

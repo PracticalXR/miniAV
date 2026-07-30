@@ -2,6 +2,7 @@
 #include "camera_context_linux_pipewire.h"
 #include "../../../include/miniav_buffer.h"
 #include "../../common/miniav_logging.h"
+#include "../../common/miniav_time.h"
 #include "../../common/miniav_utils.h"
 
 #include <pipewire/pipewire.h>
@@ -14,6 +15,7 @@
 
 #include <fcntl.h>   // For O_CLOEXEC with pipe
 #include <pthread.h> // For threading the main loop
+#include <stdatomic.h> // For the one-shot lost_cb guard
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -80,6 +82,13 @@ typedef struct PipeWirePlatformContext {
   MiniAVVideoInfo configured_video_format;
   bool is_configured;
   bool is_streaming;
+
+  // Rebases PipeWire's nanosecond graph-clock buffer time onto the shared
+  // miniav_get_time_us() epoch (reset at start_capture).
+  MiniAVTimebase timebase;
+  // One-shot guard so a cascade of error state changes fires lost_cb once
+  // (atomic: the loop thread and the app thread can race here).
+  atomic_bool lost_cb_fired;
 
   // Temporary data for enumeration/format fetching
   PipeWireDeviceTempInfo temp_devices[PW_MAX_REPORTED_DEVICES];
@@ -371,7 +380,17 @@ static void on_stream_process(void *userdata) {
   }
 
   miniav_buffer->type = MINIAV_BUFFER_TYPE_VIDEO;
-  miniav_buffer->timestamp_us = pw_buf->time;
+  // pw_buf->time is PipeWire's graph/driver clock in NANOSECONDS (signed)
+  // with its own epoch. Convert to µs and rebase onto the shared
+  // miniav_get_time_us() (CLOCK_MONOTONIC) timeline so camera timestamps are
+  // comparable with the other tracks. Buffers without a valid driver
+  // timestamp (zero or negative) use arrival time without touching the
+  // calibration.
+  miniav_buffer->timestamp_us =
+      pw_buf->time > 0
+          ? miniav_rebase_time_us(&pw_ctx->timebase,
+                                  (uint64_t)pw_buf->time / 1000)
+          : miniav_get_time_us();
   miniav_buffer->data.video.info = pw_ctx->configured_video_format;
   miniav_buffer->user_data = pw_ctx->parent_ctx->app_callback_user_data;
 
@@ -586,8 +605,8 @@ static void on_stream_process(void *userdata) {
   }
 
   miniav_buffer->internal_handle = payload;
-  pw_ctx->parent_ctx->app_callback(miniav_buffer,
-                                   pw_ctx->parent_ctx->app_callback_user_data);
+  MINIAV_SAFE_DISPATCH(pw_ctx->parent_ctx->app_callback(
+      miniav_buffer, pw_ctx->parent_ctx->app_callback_user_data));
 
   pw_stream_queue_buffer(pw_ctx->stream, pw_buf);
 }
@@ -601,7 +620,17 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
 
   if (error) {
     miniav_log(MINIAV_LOG_LEVEL_ERROR, "PW: Stream error: %s", error);
+    bool was_streaming = pw_ctx->is_streaming;
     pw_ctx->is_streaming = false; // Stop on error
+    // Hot-unplug / stream failure: tell the app instead of letting frames
+    // silently stop (mirrors the Windows terminal-HRESULT -> lost_cb path).
+    // NOTE: fires on the PipeWire loop thread — see the
+    // MiniAVContextLostCallback contract (no synchronous Stop/Destroy).
+    if (was_streaming && pw_ctx->parent_ctx && pw_ctx->parent_ctx->lost_cb &&
+        !atomic_exchange(&pw_ctx->lost_cb_fired, true)) {
+      pw_ctx->parent_ctx->lost_cb((int)MINIAV_ERROR_DEVICE_LOST,
+                                  pw_ctx->parent_ctx->lost_cb_user_data);
+    }
     if (pw_ctx->loop_running && pw_ctx->loop) {
       if (pw_ctx->wakeup_pipe[1] != -1) {
         ssize_t written =
@@ -616,8 +645,17 @@ static void on_stream_state_changed(void *userdata, enum pw_stream_state old,
   }
 
   switch (state) {
-  case PW_STREAM_STATE_UNCONNECTED:
   case PW_STREAM_STATE_ERROR:
+    // Errored without an error string: still a device/stream loss the app
+    // must hear about while it believes capture is running.
+    if (pw_ctx->is_streaming && pw_ctx->parent_ctx &&
+        pw_ctx->parent_ctx->lost_cb &&
+        !atomic_exchange(&pw_ctx->lost_cb_fired, true)) {
+      pw_ctx->parent_ctx->lost_cb((int)MINIAV_ERROR_DEVICE_LOST,
+                                  pw_ctx->parent_ctx->lost_cb_user_data);
+    }
+    // fall through to the shared teardown below
+  case PW_STREAM_STATE_UNCONNECTED:
     pw_ctx->is_streaming = false;
     if (pw_ctx->loop_running && pw_ctx->loop) {
       if (pw_ctx->wakeup_pipe[1] != -1) {
@@ -695,11 +733,23 @@ static void on_stream_param_changed(void *userdata, uint32_t id,
              current_stream_format.frame_rate_numerator,
              current_stream_format.frame_rate_denominator);
 
-  // Here you might want to verify if current_stream_format matches
-  // configured_video_format and potentially update
-  // pw_ctx->configured_video_format if the device chose a compatible
-  // alternative. For now, we assume the device accepted our request or
-  // something close.
+  // Persist what the device ACTUALLY negotiated so delivered frames and
+  // get_configured_video_format() report the real format — frames used to be
+  // stamped with the originally requested format even when the device chose
+  // a compatible alternative. Written under stop_request.mutex because this
+  // runs on the PipeWire loop thread while the app thread may concurrently
+  // read the parent field via get_configured_video_format (torn struct read
+  // otherwise).
+  if (current_stream_format.width != 0 && current_stream_format.height != 0) {
+    current_stream_format.output_preference =
+        pw_ctx->configured_video_format.output_preference;
+    pthread_mutex_lock(&pw_ctx->stop_request.mutex);
+    pw_ctx->configured_video_format = current_stream_format;
+    if (pw_ctx->parent_ctx) {
+      pw_ctx->parent_ctx->configured_video_format = current_stream_format;
+    }
+    pthread_mutex_unlock(&pw_ctx->stop_request.mutex);
+  }
 
   // After format is set, we can connect the stream if it's not already
   // connecting to streaming
@@ -1005,7 +1055,17 @@ static MiniAVResultCode pw_destroy_platform(MiniAVCameraContext *ctx) {
   if (pw_ctx->loop_thread != 0) {
     miniav_log(MINIAV_LOG_LEVEL_DEBUG,
                "PW: Waiting for loop thread to finish...");
-    pthread_join(pw_ctx->loop_thread, NULL);
+    if (miniav_timed_join(pw_ctx->loop_thread, 7000) != 0) {
+      // The loop thread still dereferences pw_ctx AND its parent_ctx —
+      // deliberately LEAK both rather than free memory a live thread uses.
+      // MINIAV_ERROR_TIMEOUT tells MiniAV_Camera_DestroyContext to skip
+      // freeing the parent context too.
+      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                 "PW: loop thread still alive at destroy — leaking the "
+                 "context to avoid a use-after-free.");
+      ctx->platform_ctx = NULL;
+      return MINIAV_ERROR_TIMEOUT;
+    }
     pw_ctx->loop_thread = 0; // Mark thread as joined
     miniav_log(MINIAV_LOG_LEVEL_DEBUG, "PW: Loop thread finished and joined.");
   }
@@ -1175,9 +1235,12 @@ static void on_node_param(void *data, int seq, uint32_t id, uint32_t index,
       seq, id_name ? id_name : "UNKNOWN_ID", id, index, next, (void *)param);
 
   if (param && id == SPA_PARAM_EnumFormat) {
+    // Accumulate — PipeWire delivers ONE param event per supported mode, so
+    // quitting the loop here (as this used to) truncated the device's real
+    // format list to a single entry. The loop is quit by the core sync-done
+    // event issued after enum_params (see on_node_info /
+    // on_core_sync_done_format).
     parse_spa_format_choices(param, format_data);
-
-    pw_main_loop_quit(format_data->loop);
   }
 }
 
@@ -1190,6 +1253,11 @@ static void on_node_info(void *data, const struct pw_node_info *info) {
   if (info) {
     pw_node_enum_params(format_data->node_proxy, 1, SPA_PARAM_EnumFormat, 0,
                         UINT32_MAX, NULL);
+    // Sync AFTER enum_params: the server processes the sync only once every
+    // pending param event has been delivered, so on_core_sync_done_format
+    // quits the loop exactly when the full format list has arrived.
+    format_data->pending_sync =
+        pw_core_sync(format_data->core, PW_ID_CORE, 0);
   } else {
     miniav_log(MINIAV_LOG_LEVEL_WARN,
                "PW: on_node_info called with NULL info.");
@@ -1204,6 +1272,13 @@ static const struct pw_node_events node_info_events = {
     PW_VERSION_NODE_EVENTS,
     .info = on_node_info,
     .param = on_node_param,
+};
+
+// Core events for the format-enumeration loop: quit on the sync issued after
+// enum_params (i.e. after ALL param events have been delivered).
+static const struct pw_core_events core_sync_events_format = {
+    PW_VERSION_CORE_EVENTS,
+    .done = on_core_sync_done_format,
 };
 
 static MiniAVResultCode pw_get_supported_formats(const char *device_id_str,
@@ -1276,10 +1351,23 @@ static MiniAVResultCode pw_get_supported_formats(const char *device_id_str,
   }
   pw_node_add_listener(node_proxy, &node_listener_local, &node_info_events,
                        &format_data);
+  struct spa_hook core_listener_local;
+  spa_zero(core_listener_local);
+  pw_core_add_listener(core, &core_listener_local, &core_sync_events_format,
+                       &format_data);
+
+  // Initial sync so the loop ALWAYS terminates: if the bound id never emits
+  // node info (wrong object type, dead node), this sync's done event quits
+  // the loop with zero formats instead of blocking the caller forever. When
+  // node info DOES arrive first, on_node_info overwrites pending_sync with
+  // the post-enum_params sync, so this initial done no longer matches and
+  // the loop keeps running until the format list is complete.
+  format_data.pending_sync = pw_core_sync(core, PW_ID_CORE, 0);
 
   miniav_log(MINIAV_LOG_LEVEL_DEBUG,
              "PW: Running loop for node info (node %u).", node_id);
   pw_main_loop_run(loop);
+  spa_hook_remove(&core_listener_local);
 
   if (format_data.result == MINIAV_SUCCESS) {
     if (*count_out > 0) {
@@ -1377,12 +1465,24 @@ pw_get_configured_video_format(MiniAVCameraContext *ctx,
     return MINIAV_ERROR_INVALID_ARG;
   }
 
-  if (ctx->configured_video_format.width == 0 ||
-      ctx->configured_video_format.height == 0) {
+  // Read under the same mutex the loop thread's negotiated-format write-back
+  // takes (on_stream_param_changed) so the multi-field struct copy can't be
+  // torn mid-update.
+  PipeWirePlatformContext *pw_ctx =
+      (PipeWirePlatformContext *)ctx->platform_ctx;
+  if (pw_ctx) {
+    pthread_mutex_lock(&pw_ctx->stop_request.mutex);
+  }
+  MiniAVVideoInfo snapshot = ctx->configured_video_format;
+  if (pw_ctx) {
+    pthread_mutex_unlock(&pw_ctx->stop_request.mutex);
+  }
+
+  if (snapshot.width == 0 || snapshot.height == 0) {
     return MINIAV_ERROR_NOT_INITIALIZED;
   }
 
-  *format_out = ctx->configured_video_format;
+  *format_out = snapshot;
   return MINIAV_SUCCESS;
 }
 
@@ -1435,6 +1535,10 @@ static MiniAVResultCode pw_start_capture(MiniAVCameraContext *ctx) {
     miniav_log(MINIAV_LOG_LEVEL_WARN, "PW: Already streaming or loop running.");
     return MINIAV_ERROR_INVALID_OPERATION;
   }
+
+  // Fresh timestamp calibration + lost-notification guard per capture run.
+  memset(&pw_ctx->timebase, 0, sizeof(pw_ctx->timebase));
+  atomic_store(&pw_ctx->lost_cb_fired, false);
 
   pw_ctx->stream = pw_stream_new(
       pw_ctx->core, "miniav-camera-capture",
@@ -1576,8 +1680,26 @@ static MiniAVResultCode pw_stop_capture(MiniAVCameraContext *ctx) {
 
     // Join the thread
     if (pw_ctx->loop_running || pw_ctx->loop_thread != 0) {
+      if (pthread_equal(pw_ctx->loop_thread, pthread_self())) {
+        // Called from the loop thread itself (e.g. an app violating the
+        // lost_cb contract by stopping synchronously from the callback):
+        // joining would self-deadlock. Bail and leave the join to a later
+        // call from another thread.
+        miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                   "PW: StopCapture called from the loop thread — skipping "
+                   "self-join (see MiniAVContextLostCallback docs).");
+        return MINIAV_ERROR_INVALID_OPERATION;
+      }
       miniav_log(MINIAV_LOG_LEVEL_DEBUG, "PW: Joining PipeWire loop thread.");
-      pthread_join(pw_ctx->loop_thread, NULL);
+      if (miniav_timed_join(pw_ctx->loop_thread, 5000) != 0) {
+        // The cond-timedwait above already expired once; an unconditional
+        // join here used to defeat that timeout entirely and hang
+        // StopCapture forever on a wedged PipeWire call.
+        miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                   "PW: loop thread did not exit within 5s — deferring (a "
+                   "later Stop/Destroy will retry the join).");
+        return MINIAV_ERROR_TIMEOUT; // loop_thread left set for retry
+      }
       pw_ctx->loop_thread = 0;
       miniav_log(MINIAV_LOG_LEVEL_DEBUG, "PW: PipeWire loop thread joined.");
     }

@@ -3,6 +3,12 @@ part of '../miniav_web.dart';
 /// Web implementation of [MiniLoopbackPlatformInterface]
 class MiniAVWebLoopbackPlatform implements MiniLoopbackPlatformInterface {
   @override
+  void Function() addDeviceChangeListener(MiniAVDeviceChangeListener listener) {
+    // Web doesn't support loopback capture; no devices to notify about.
+    return () {};
+  }
+
+  @override
   Future<List<MiniAVDeviceInfo>> enumerateDevices() async {
     // Web doesn't support system audio loopback capture
     return [];
@@ -26,6 +32,11 @@ class MiniAVWebLoopbackPlatform implements MiniLoopbackPlatformInterface {
 
 /// Web stub for [MiniLoopbackContextPlatformInterface] (not actually used)
 class MiniAVWebLoopbackContext implements MiniLoopbackContextPlatformInterface {
+  @override
+  void Function() addLostListener(MiniAVContextLostListener listener) {
+    return () {};
+  }
+
   @override
   Future<void> configure(String targetId, MiniAVAudioInfo format) async {
     throw UnsupportedError(

@@ -38,6 +38,30 @@ void miniav_log(MiniAVLogLevel level, const char *fmt, ...) {
 
   temp_buffer[sizeof(temp_buffer) - 1] = '\0'; // Ensure null termination
 
+  // Snapshot the callback pair so a concurrent re-registration can't tear the
+  // (callback, user_data) association mid-call.
+  MiniAVLogCallback cb = g_log_callback;
+  void *cb_user_data = g_log_user_data;
+  if (cb) {
+    // An embedder-installed callback is the single delivery path: GUI hosts
+    // (e.g. Flutter apps) have no visible stderr, which previously made every
+    // native log line disappear in the field.
+    //
+    // OWNERSHIP: the message is a heap copy the RECEIVER frees with
+    // MiniAV_Free once consumed. The callback may be dispatched
+    // asynchronously onto another thread (the Dart FFI shim uses
+    // NativeCallable.listener, which runs the handler on the event loop
+    // after this call returns), so a stack/static buffer would be dangling
+    // by the time it is read.
+    size_t msg_len = strlen(temp_buffer) + 1;
+    char *heap_msg = (char *)malloc(msg_len);
+    if (heap_msg) {
+      memcpy(heap_msg, temp_buffer, msg_len);
+      cb(level, heap_msg, cb_user_data);
+      return;
+    }
+    // OOM: fall through to stderr so the message isn't lost entirely.
+  }
   fprintf(stderr, "[MiniAV C - %s]: %s\n", get_log_level_string(level), temp_buffer);
   fflush(stderr); // Ensure it's flushed
 }
@@ -47,6 +71,11 @@ void miniav_set_log_level(MiniAVLogLevel level) {
 }
 
 void miniav_set_log_callback(MiniAVLogCallback callback, void *user_data) {
-  g_log_callback = callback; // Store it, but miniav_log won't use it directly
+  // Best-effort ordering for the unsynchronized snapshot in miniav_log:
+  // publish user_data before the callback that consumes it. This is NOT a
+  // formal happens-before (no fences) — register the callback before starting
+  // any capture, and treat re-registration during active capture as a benign
+  // race that may pair one message with the previous user_data.
   g_log_user_data = user_data;
+  g_log_callback = callback;
 }

@@ -28,6 +28,8 @@ typedef struct LoopbackPlatformContextWinWasapi {
   UINT32 buffer_frame_count;
   HANDLE capture_thread_handle;
   HANDLE stop_event_handle;
+  HANDLE buffer_event_handle;
+  BOOL event_driven_capture;
   BOOL attempt_process_specific_capture;
   DWORD target_process_id; // For logging/debugging if process-specific
   LARGE_INTEGER qpc_frequency;

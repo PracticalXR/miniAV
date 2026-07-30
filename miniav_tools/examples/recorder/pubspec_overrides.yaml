@@ -1,0 +1,28 @@
+dependency_overrides:
+  miniav:
+    path: ../../../miniav
+  miniav_ffi:
+    path: ../../../miniav_ffi
+  miniav_platform_interface:
+    path: ../../../miniav_platform_interface
+
+  miniav_tools:
+    path: ../../miniav_tools
+  miniav_tools_ffmpeg:
+    path: ../../miniav_tools_ffmpeg
+  miniav_tools_platform_interface:
+    path: ../../miniav_tools_platform_interface
+
+  miniav_recorder:
+    path: ../../miniav_recorder
+
+  minigpu_platform_interface:
+    path: ../../../../minigpu/minigpu_platform_interface
+  minigpu:
+    path: ../../../../minigpu/minigpu
+  minigpu_ffi:
+    path: ../../../../minigpu/minigpu_ffi
+  minigpu_web:
+    path: ../../../../minigpu/minigpu_web
+  miniav_web:
+    path: ../../../miniav_web

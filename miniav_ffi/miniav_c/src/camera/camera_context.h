@@ -52,19 +52,42 @@ struct MiniAVCameraContext {
 
     MiniAVVideoInfo configured_video_format; // Store the currently configured format
     char selected_device_id[MINIAV_DEVICE_ID_MAX_LEN]; // Store the ID of the selected device
+
+    // Set via MiniAV_Camera_SetContextLostCallback. May be NULL.
+    MiniAVContextLostCallback lost_cb;
+    void *lost_cb_user_data;
 };
 
 // Platform-specific initialization functions
 // These will set up ctx->ops and call ops->init_platform
+//
+// GATE ORDER MATTERS: Android defines __linux__ and iOS defines __APPLE__,
+// so the mobile branches must come first in this #elif chain — a bare
+// __APPLE__/__linux__ match on mobile would reference desktop ops symbols
+// that are not compiled there (link error).
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #if defined(_WIN32)
 #include "windows/camera_context_win_mf.h"
 extern MiniAVResultCode miniav_camera_context_platform_init_windows_mf(MiniAVCameraContext* ctx);
 extern const CameraContextInternalOps g_camera_ops_win_mf;
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+#include "ios/camera_context_ios_avf.h"
+extern const CameraContextInternalOps g_camera_ops_ios_avf;
+extern MiniAVResultCode
+miniav_camera_context_platform_init_ios_avf(MiniAVCameraContext *ctx);
 #elif defined(__APPLE__)
 #include "macos/camera_context_macos_avf.h"
 extern const CameraContextInternalOps g_camera_ops_macos_avf;
 extern MiniAVResultCode
 miniav_camera_context_platform_init_macos_avf(MiniAVCameraContext* ctx);
+#elif defined(__ANDROID__)
+#include "android/camera_context_android_camera2.h"
+extern const CameraContextInternalOps g_camera_ops_android_camera2;
+extern MiniAVResultCode miniav_camera_context_platform_init_android_camera2(
+    MiniAVCameraContext *ctx);
 #elif defined(__linux__)
 #include "linux/camera_context_linux_pipewire.h" // You will need to create this header
 extern const CameraContextInternalOps

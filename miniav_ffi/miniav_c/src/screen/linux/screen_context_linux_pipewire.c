@@ -305,15 +305,22 @@ static void setup_gpu_planes_for_format(MiniAVBuffer *buffer,
                                         MiniAVPixelFormat format,
                                         uint32_t width, uint32_t height,
                                         int dmabuf_fd, size_t total_size) {
+// Helper: set both legacy data_ptr cast and new typed dmabuf_fd field
+#define PW_SET_PLANE_DMABUF(buf, idx, fd) \
+  do { \
+    (buf)->data.video.planes[(idx)].data_ptr = (void *)(intptr_t)(fd); \
+    (buf)->data.video.planes[(idx)].dmabuf_fd = (fd); \
+    (buf)->data.video.planes[(idx)].drm_format_modifier = 0; /* DRM_FORMAT_MOD_LINEAR */ \
+  } while (0)
+
   switch (format) {
   case MINIAV_PIXEL_FORMAT_BGRA32:
   case MINIAV_PIXEL_FORMAT_RGBA32:
   case MINIAV_PIXEL_FORMAT_ARGB32:
   case MINIAV_PIXEL_FORMAT_ABGR32:
   case MINIAV_PIXEL_FORMAT_BGRX32: {
-    // Single-plane RGB formats
     buffer->data.video.num_planes = 1;
-    buffer->data.video.planes[0].data_ptr = (void *)(intptr_t)dmabuf_fd;
+    PW_SET_PLANE_DMABUF(buffer, 0, dmabuf_fd);
     buffer->data.video.planes[0].width = width;
     buffer->data.video.planes[0].height = height;
     buffer->data.video.planes[0].stride_bytes = width * 4;
@@ -324,9 +331,8 @@ static void setup_gpu_planes_for_format(MiniAVBuffer *buffer,
 
   case MINIAV_PIXEL_FORMAT_RGB24:
   case MINIAV_PIXEL_FORMAT_BGR24: {
-    // Single-plane RGB formats
     buffer->data.video.num_planes = 1;
-    buffer->data.video.planes[0].data_ptr = (void *)(intptr_t)dmabuf_fd;
+    PW_SET_PLANE_DMABUF(buffer, 0, dmabuf_fd);
     buffer->data.video.planes[0].width = width;
     buffer->data.video.planes[0].height = height;
     buffer->data.video.planes[0].stride_bytes = width * 3;
@@ -336,29 +342,25 @@ static void setup_gpu_planes_for_format(MiniAVBuffer *buffer,
   }
 
   case MINIAV_PIXEL_FORMAT_I420: {
-    // Three-plane YUV format - all using same DMA-BUF FD with different offsets
     buffer->data.video.num_planes = 3;
     uint32_t y_size = width * height;
     uint32_t uv_size = (width / 2) * (height / 2);
 
-    // Y plane
-    buffer->data.video.planes[0].data_ptr = (void *)(intptr_t)dmabuf_fd;
+    PW_SET_PLANE_DMABUF(buffer, 0, dmabuf_fd);
     buffer->data.video.planes[0].width = width;
     buffer->data.video.planes[0].height = height;
     buffer->data.video.planes[0].stride_bytes = width;
     buffer->data.video.planes[0].offset_bytes = 0;
     buffer->data.video.planes[0].subresource_index = 0;
 
-    // U plane
-    buffer->data.video.planes[1].data_ptr = (void *)(intptr_t)dmabuf_fd;
+    PW_SET_PLANE_DMABUF(buffer, 1, dmabuf_fd);
     buffer->data.video.planes[1].width = width / 2;
     buffer->data.video.planes[1].height = height / 2;
     buffer->data.video.planes[1].stride_bytes = width / 2;
     buffer->data.video.planes[1].offset_bytes = y_size;
     buffer->data.video.planes[1].subresource_index = 1;
 
-    // V plane
-    buffer->data.video.planes[2].data_ptr = (void *)(intptr_t)dmabuf_fd;
+    PW_SET_PLANE_DMABUF(buffer, 2, dmabuf_fd);
     buffer->data.video.planes[2].width = width / 2;
     buffer->data.video.planes[2].height = height / 2;
     buffer->data.video.planes[2].stride_bytes = width / 2;
@@ -368,20 +370,17 @@ static void setup_gpu_planes_for_format(MiniAVBuffer *buffer,
   }
 
   case MINIAV_PIXEL_FORMAT_NV12: {
-    // Two-plane YUV format
     buffer->data.video.num_planes = 2;
     uint32_t y_size = width * height;
 
-    // Y plane
-    buffer->data.video.planes[0].data_ptr = (void *)(intptr_t)dmabuf_fd;
+    PW_SET_PLANE_DMABUF(buffer, 0, dmabuf_fd);
     buffer->data.video.planes[0].width = width;
     buffer->data.video.planes[0].height = height;
     buffer->data.video.planes[0].stride_bytes = width;
     buffer->data.video.planes[0].offset_bytes = 0;
     buffer->data.video.planes[0].subresource_index = 0;
 
-    // UV plane
-    buffer->data.video.planes[1].data_ptr = (void *)(intptr_t)dmabuf_fd;
+    PW_SET_PLANE_DMABUF(buffer, 1, dmabuf_fd);
     buffer->data.video.planes[1].width = width / 2;
     buffer->data.video.planes[1].height = height / 2;
     buffer->data.video.planes[1].stride_bytes = width;
@@ -391,9 +390,8 @@ static void setup_gpu_planes_for_format(MiniAVBuffer *buffer,
   }
 
   default: {
-    // Unknown format - assume single plane
     buffer->data.video.num_planes = 1;
-    buffer->data.video.planes[0].data_ptr = (void *)(intptr_t)dmabuf_fd;
+    PW_SET_PLANE_DMABUF(buffer, 0, dmabuf_fd);
     buffer->data.video.planes[0].width = width;
     buffer->data.video.planes[0].height = height;
     buffer->data.video.planes[0].stride_bytes = width * 4;
@@ -406,6 +404,8 @@ static void setup_gpu_planes_for_format(MiniAVBuffer *buffer,
     break;
   }
   }
+
+#undef PW_SET_PLANE_DMABUF
 }
 
 static uint32_t get_display_refresh_rate_hz(void) {
@@ -1123,10 +1123,19 @@ pw_screen_configure_region(struct MiniAVScreenContext *ctx,
                pctx->requested_audio_format.format);
   }
 
-  miniav_log(MINIAV_LOG_LEVEL_WARN, "PW Screen: Region capture support depends "
-                                    "on portal/source capabilities. "
-                                    "Client-side cropping might be necessary "
-                                    "if portal provides full source.");
+  // HONESTY NOTE: region_x/region_y are stored but the PipeWire delivery path
+  // does NOT crop to them — xdg-desktop-portal negotiates a whole source
+  // (monitor/window), and client-side cropping of the delivered buffer is not
+  // implemented. So the app receives the FULL source, not the sub-rectangle.
+  // The config is still accepted (the portal may honor the requested size for
+  // some sources) but callers must not assume the frame is cropped. See
+  // NATIVE_AUDIT.md "region capture" (deferred). macOS honors regions via
+  // SCStreamConfiguration.sourceRect; Windows returns NOT_SUPPORTED.
+  miniav_log(MINIAV_LOG_LEVEL_WARN,
+             "PW Screen: region capture is NOT cropped client-side — the app "
+             "receives the full portal source, not the %dx%d sub-rectangle. "
+             "Crop downstream if you need the exact region.",
+             width, height);
 
   ctx->is_configured = true;
   ctx->configured_video_format = pctx->requested_video_format;
@@ -1688,6 +1697,49 @@ static MiniAVResultCode pw_screen_start_capture(struct MiniAVScreenContext *ctx,
   return MINIAV_SUCCESS;
 }
 
+// xdg-desktop-portal ScreenCast cursor modes (bitmask values, per the portal
+// spec). AvailableCursorModes advertises which the backend supports.
+#define XDP_CURSOR_MODE_HIDDEN 1u   // default here — no cursor in frames
+#define XDP_CURSOR_MODE_EMBEDDED 2u // cursor drawn into the frame pixels
+#define XDP_CURSOR_MODE_METADATA 4u // cursor delivered as separate metadata
+
+// Read the ScreenCast "AvailableCursorModes" property (a uint32 bitmask) via
+// the org.freedesktop.DBus.Properties.Get method. Returns 0 if it cannot be
+// read (older portal without the property, or an error) — callers then fall
+// back to hidden-cursor behaviour.
+static uint32_t
+portal_get_available_cursor_modes(PipeWireScreenPlatformContext *pctx) {
+  GError *error = NULL;
+  GVariant *reply = g_dbus_connection_call_sync(
+      pctx->dbus_conn, XDP_BUS_NAME, XDP_OBJECT_PATH,
+      "org.freedesktop.DBus.Properties", "Get",
+      g_variant_new("(ss)", XDP_IFACE_SCREENCAST, "AvailableCursorModes"),
+      G_VARIANT_TYPE("(v)"), G_DBUS_CALL_FLAGS_NONE, -1, pctx->cancellable,
+      &error);
+  if (!reply) {
+    miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+               "PW Screen: could not read AvailableCursorModes (%s); assuming "
+               "cursor-mode support is limited to hidden.",
+               error ? error->message : "unknown");
+    if (error) {
+      g_error_free(error);
+    }
+    return 0;
+  }
+
+  uint32_t modes = 0;
+  GVariant *inner = NULL;
+  g_variant_get(reply, "(v)", &inner);
+  if (inner) {
+    if (g_variant_is_of_type(inner, G_VARIANT_TYPE_UINT32)) {
+      modes = g_variant_get_uint32(inner);
+    }
+    g_variant_unref(inner);
+  }
+  g_variant_unref(reply);
+  return modes;
+}
+
 static void
 portal_initiate_select_sources(PipeWireScreenPlatformContext *pctx) {
   pctx->current_portal_op_state = PORTAL_OP_STATE_SELECTING_SOURCES;
@@ -1711,6 +1763,44 @@ portal_initiate_select_sources(PipeWireScreenPlatformContext *pctx) {
     source_types = (1 << 0) | (1 << 1); // Region or default
   g_variant_builder_add(&options_builder, "{sv}", "types",
                         g_variant_new_uint32(source_types));
+
+  // Cursor mode: honour MiniAVScreenContext.capture_cursor (set via
+  // MiniAV_Screen_SetCaptureCursor before configure). Embedded (2) draws the
+  // cursor into the frame; hidden (1) is the default cursor-less behaviour.
+  // The portal advertises which modes it supports via AvailableCursorModes —
+  // fall back gracefully if the requested mode is unsupported.
+  bool want_cursor = pctx->parent_ctx && pctx->parent_ctx->capture_cursor;
+  uint32_t available_modes = portal_get_available_cursor_modes(pctx);
+  uint32_t cursor_mode;
+  if (want_cursor) {
+    if (available_modes & XDP_CURSOR_MODE_EMBEDDED) {
+      cursor_mode = XDP_CURSOR_MODE_EMBEDDED;
+    } else if (available_modes & XDP_CURSOR_MODE_METADATA) {
+      // Embedded unsupported but metadata is: request metadata so the cursor
+      // is at least reported. (This backend does not yet composite the
+      // metadata cursor into frames, but the mode is valid and future-proof.)
+      cursor_mode = XDP_CURSOR_MODE_METADATA;
+      miniav_log(MINIAV_LOG_LEVEL_WARN,
+                 "PW Screen: capture_cursor requested but portal lacks EMBEDDED "
+                 "cursor mode; requesting METADATA (cursor not composited into "
+                 "frames by this backend).");
+    } else {
+      cursor_mode = XDP_CURSOR_MODE_HIDDEN;
+      miniav_log(MINIAV_LOG_LEVEL_WARN,
+                 "PW Screen: capture_cursor requested but portal advertises no "
+                 "embedded/metadata cursor mode (available=0x%x); falling back "
+                 "to hidden.",
+                 available_modes);
+    }
+  } else {
+    cursor_mode = XDP_CURSOR_MODE_HIDDEN;
+  }
+  g_variant_builder_add(&options_builder, "{sv}", "cursor_mode",
+                        g_variant_new_uint32(cursor_mode));
+  miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+             "PW Screen: SelectSources cursor_mode=%u (want_cursor=%d, "
+             "available=0x%x).",
+             cursor_mode, want_cursor, available_modes);
 
   GVariant *params_for_select_sources = g_variant_new(
       "(oa{sv})", pctx->portal_session_handle_str, &options_builder);
@@ -2014,9 +2104,21 @@ pw_screen_stop_capture(struct MiniAVScreenContext *ctx) {
     }
   }
 
-  // Wait for the loop thread to finish (it will clean up streams)
+  // Wait for the loop thread to finish (it will clean up streams) — bounded,
+  // so a wedged compositor/PipeWire call cannot hang StopCapture forever.
   if (pctx->loop_thread) {
-    pthread_join(pctx->loop_thread, NULL);
+    if (pthread_equal(pctx->loop_thread, pthread_self())) {
+      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                 "PW Screen: StopCapture called from the loop thread — "
+                 "skipping self-join (see MiniAVContextLostCallback docs).");
+      return MINIAV_ERROR_INVALID_OPERATION;
+    }
+    if (miniav_timed_join(pctx->loop_thread, 5000) != 0) {
+      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                 "PW Screen: loop thread did not exit within 5s — deferring "
+                 "(a later Stop/Destroy will retry the join).");
+      return MINIAV_ERROR_TIMEOUT; // loop_thread left set for retry
+    }
     pctx->loop_thread = 0;
   }
 
@@ -2094,6 +2196,24 @@ pw_screen_destroy_platform(struct MiniAVScreenContext *ctx) {
     pw_screen_stop_capture(ctx);
   }
 
+  // If a stop attempt timed out, the loop thread is still alive and still
+  // dereferences pctx — retry the join here and, if it STILL won't exit,
+  // deliberately LEAK the platform context rather than free memory a live
+  // thread uses.
+  if (pctx->loop_thread) {
+    if (miniav_timed_join(pctx->loop_thread, 7000) != 0) {
+      // The loop thread also dereferences the parent context —
+      // MINIAV_ERROR_TIMEOUT tells MiniAV_Screen_DestroyContext to skip
+      // freeing that too.
+      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                 "PW Screen: loop thread still alive at destroy — leaking "
+                 "the context to avoid a use-after-free.");
+      ctx->platform_ctx = NULL;
+      return MINIAV_ERROR_TIMEOUT;
+    }
+    pctx->loop_thread = 0;
+  }
+
   // Clean up D-Bus subscriptions first
   if (pctx->current_request_signal_subscription_id > 0) {
     g_dbus_connection_signal_unsubscribe(
@@ -2155,15 +2275,30 @@ pw_screen_destroy_platform(struct MiniAVScreenContext *ctx) {
     pctx->current_portal_request_object_path_str = NULL;
   }
 
-  // Stop the GLib main loop thread
+  // Stop the GLib main loop thread — bounded so a wedged GLib dispatch can't
+  // hang DestroyContext. On timeout the thread is DETACHED and the loop ref
+  // deliberately leaked (quit was already requested, so the thread exits and
+  // self-reaps whenever it unwedges); gloop_thread is cleared so the next
+  // context init doesn't clobber a still-joinable thread id.
   if (gloop) {
     g_main_loop_quit(gloop);
     if (gloop_thread) {
-      pthread_join(gloop_thread, NULL);
-      gloop_thread = 0;
+      if (miniav_timed_join(gloop_thread, 5000) != 0) {
+        miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                   "PW Screen: GLib loop thread did not exit within 5s — "
+                   "detaching it and leaking the GLib loop.");
+        pthread_detach(gloop_thread);
+        gloop_thread = 0;
+        gloop = NULL; // leak the ref; the detached thread still runs on it
+      } else {
+        gloop_thread = 0;
+        g_main_loop_unref(gloop);
+        gloop = NULL;
+      }
+    } else {
+      g_main_loop_unref(gloop);
+      gloop = NULL;
     }
-    g_main_loop_unref(gloop);
-    gloop = NULL;
   }
 
   miniav_free(pctx);
@@ -2924,8 +3059,8 @@ static void on_video_stream_process(void *data) {
     miniav_buffer->internal_handle = payload_alloc;
 
     // Deliver to app
-    pctx->parent_ctx->app_callback(miniav_buffer,
-                                   pctx->parent_ctx->app_callback_user_data);
+    MINIAV_SAFE_DISPATCH(pctx->parent_ctx->app_callback(
+        miniav_buffer, pctx->parent_ctx->app_callback_user_data));
     payload_alloc = NULL; // Ownership passed to app
 
   queue_and_continue_video:
@@ -3153,8 +3288,8 @@ static void on_audio_stream_process(void *data) {
                miniav_buffer->data_size_bytes,
                miniav_buffer->data.audio.frame_count,
                miniav_buffer->timestamp_us);
-    pctx->parent_ctx->app_callback(miniav_buffer,
-                                   pctx->parent_ctx->app_callback_user_data);
+    MINIAV_SAFE_DISPATCH(pctx->parent_ctx->app_callback(
+        miniav_buffer, pctx->parent_ctx->app_callback_user_data));
     payload_alloc = NULL; // Callback owns it now
 
   queue_audio_and_continue:

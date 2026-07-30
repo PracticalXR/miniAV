@@ -1,0 +1,20 @@
+name: camera_mp4
+description: >
+  Camera → MP4 example: miniav webcam capture (CPU NV12/BGRA) encoded to
+  H.264 via FFmpeg and muxed to MP4.
+publish_to: none
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  miniav: ^0.5.10
+  miniav_ffi: ^0.5.10
+  miniav_platform_interface: ^0.5.10
+
+  miniav_tools: ^0.1.0
+  miniav_tools_ffmpeg: ^0.1.0
+  miniav_tools_platform_interface: ^0.1.0
+
+dev_dependencies:
+  test: ^1.25.0

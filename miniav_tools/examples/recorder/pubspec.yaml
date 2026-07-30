@@ -1,0 +1,21 @@
+name: recorder_examples
+description: >
+  Examples for the miniav_recorder package — high-level synchronized
+  capture (screen / camera / mic / loopback) → encoded files & live chunks.
+publish_to: none
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  miniav: ^0.5.10
+  miniav_ffi: ^0.5.10
+  miniav_platform_interface: ^0.5.10
+
+  miniav_tools: ^0.1.0
+  miniav_tools_ffmpeg: ^0.1.0
+  miniav_tools_platform_interface: ^0.1.0
+  miniav_recorder: ^0.1.0
+
+dev_dependencies:
+  test: ^1.25.0

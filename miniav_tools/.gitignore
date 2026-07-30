@@ -1,0 +1,42 @@
+# Dart / Flutter
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+build/
+pubspec.lock
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/launch.json
+!.vscode/settings.json
+*.iml
+
+# Native build outputs
+src/build/
+src/build_*/
+src/external/**/build/
+src/external/**/build_*/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated media files (recordings, clips, test outputs)
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.flv
+*.ts
+*.mp3
+*.aac
+*.wav
+*.ogg
+*.opus
+*.flac
+*.m4a
+*.yuv
+*.log

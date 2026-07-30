@@ -10,6 +10,11 @@ abstract class MiniLoopbackPlatformInterface {
 
   /// Create a loopback capture context.
   Future<MiniLoopbackContextPlatformInterface> createContext();
+
+  /// Subscribe to loopback target add/remove notifications.
+  void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => throw UnsupportedError('Device-change subscription not supported.');
 }
 
 /// Abstract loopback context for configuring and capturing system audio output.
@@ -32,4 +37,9 @@ abstract class MiniLoopbackContextPlatformInterface {
 
   /// Destroy this loopback context and release resources.
   Future<void> destroy();
+
+  /// Subscribe to a one-shot lost notification (rendering endpoint removed,
+  /// process target ended, etc.).
+  void Function() addLostListener(MiniAVContextLostListener listener) =>
+      throw UnsupportedError('Context-lost subscription not supported.');
 }

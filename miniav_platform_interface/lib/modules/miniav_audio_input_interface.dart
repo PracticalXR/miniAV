@@ -13,6 +13,11 @@ abstract class MiniAudioInputPlatformInterface {
 
   /// Create an audio input capture context.
   Future<MiniAudioInputContextPlatformInterface> createContext();
+
+  /// Subscribe to audio input device add/remove notifications.
+  void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => throw UnsupportedError('Device-change subscription not supported.');
 }
 
 /// Abstract audio input context for configuring and capturing from a microphone.
@@ -35,4 +40,8 @@ abstract class MiniAudioInputContextPlatformInterface {
 
   /// Destroy this audio input context and release resources.
   Future<void> destroy();
+
+  /// Subscribe to a one-shot lost notification (microphone unplugged, etc.).
+  void Function() addLostListener(MiniAVContextLostListener listener) =>
+      throw UnsupportedError('Context-lost subscription not supported.');
 }

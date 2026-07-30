@@ -9,6 +9,7 @@
 #include <pipewire/pipewire.h>
 #include <spa/pod/builder.h> // For SPA_POD_BUILDER_INIT
 #include <pthread.h>         // For pthread_t
+#include <stdatomic.h>       // For the one-shot lost_cb guard
 
 #define PW_LOOPBACK_MAX_REPORTED_DEVICES 32
 #define PW_LOOPBACK_MAX_REPORTED_FORMATS 32
@@ -24,6 +25,9 @@ typedef struct PipeWireLoopbackTempDeviceInfo {
 
 
 typedef struct PipeWireLoopbackPlatformContext {
+  struct MiniAVLoopbackContext *parent_ctx; // Back-pointer for lost_cb access
+  atomic_bool lost_cb_fired; // One-shot loss-notification guard per run
+
   struct pw_main_loop *loop; // PipeWire main loop
   struct pw_context *context; // PipeWire context
   struct pw_core *core;       // PipeWire core

@@ -84,6 +84,7 @@ static MiniAVResultCode
 pw_loopback_init_platform(struct MiniAVLoopbackContext *ctx) {
   PipeWireLoopbackPlatformContext *pw_ctx =
       (PipeWireLoopbackPlatformContext *)ctx->platform_ctx;
+  pw_ctx->parent_ctx = ctx;
   miniav_log(MINIAV_LOG_LEVEL_DEBUG,
              "PW Loopback: Initializing platform context.");
 
@@ -160,9 +161,19 @@ pw_loopback_destroy_platform(struct MiniAVLoopbackContext *ctx) {
       pw_main_loop_quit(pw_ctx->loop);
     }
 
-    // Wait for thread to finish
+    // Wait for thread to finish — bounded; if it will not exit, LEAK the
+    // platform context rather than free memory a live thread dereferences.
     if (pw_ctx->loop_thread) {
-      pthread_join(pw_ctx->loop_thread, NULL);
+      if (miniav_timed_join(pw_ctx->loop_thread, 7000) != 0) {
+        // The loop thread also dereferences the parent context —
+        // MINIAV_ERROR_TIMEOUT tells MiniAV_Loopback_DestroyContext to skip
+        // freeing that too.
+        miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                   "PW Loopback: loop thread still alive at destroy — "
+                   "leaking the context to avoid a use-after-free.");
+        ctx->platform_ctx = NULL;
+        return MINIAV_ERROR_TIMEOUT;
+      }
       pw_ctx->loop_thread = 0;
     }
     pw_ctx->is_streaming = false;
@@ -352,8 +363,14 @@ pw_loopback_get_supported_formats(const char *target_device_id,
   (*formats_out)[0].channels = 2;
   *count_out = 1;
 
-  miniav_log(MINIAV_LOG_LEVEL_WARN, "PW Loopback: GetSupportedFormats is "
-                                    "simplified, returning F32/48kHz/2ch.");
+  // PipeWire streams are format-adaptive: the graph converts/resamples to
+  // whatever the stream requests, so unlike a hardware device there is no
+  // fixed capability list to enumerate. The entry above is the suggested
+  // request; the format actually negotiated is written back to the
+  // configured format when the stream connects (on_stream_param_changed).
+  miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+             "PW Loopback: GetSupportedFormats — PipeWire adapts to the "
+             "requested format; suggesting F32/48kHz/2ch.");
   return MINIAV_SUCCESS;
 }
 static MiniAVResultCode
@@ -365,16 +382,17 @@ pw_loopback_get_default_format_platform(const char *target_device_id,
   if (!format_out)
     return MINIAV_ERROR_INVALID_ARG;
 
-  // Simplified: Return a common high-quality format.
-  // A real implementation would query the specific node (if target_device_id is
-  // provided) or the default sink's monitor.
+  // PipeWire converts/resamples to whatever the stream requests, so the
+  // "default" here is a suggestion, not a device constraint (48 kHz matches
+  // the typical graph clock). The format actually negotiated at connect time
+  // is written back to the configured format (on_stream_param_changed).
   format_out->format = MINIAV_AUDIO_FORMAT_F32;
   format_out->sample_rate = 48000;
   format_out->channels = 2;
 
-  miniav_log(
-      MINIAV_LOG_LEVEL_WARN,
-      "PW Loopback: GetDefaultFormat is simplified, returning F32/48kHz/2ch.");
+  miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+             "PW Loopback: GetDefaultFormat — suggesting F32/48kHz/2ch "
+             "(PipeWire adapts to the requested format).");
   return MINIAV_SUCCESS;
 }
 
@@ -443,6 +461,8 @@ pw_loopback_start_capture(struct MiniAVLoopbackContext *ctx,
 
   pw_ctx->app_callback = callback;
   pw_ctx->app_user_data = user_data;
+  // Fresh loss-notification guard per run.
+  atomic_store(&pw_ctx->lost_cb_fired, false);
 
   static const struct pw_stream_events stream_events = {
       PW_VERSION_STREAM_EVENTS,
@@ -551,9 +571,24 @@ pw_loopback_stop_capture(struct MiniAVLoopbackContext *ctx) {
 
   // Wait for the loop thread to finish (it will clean up the stream)
   if (pw_ctx->loop_thread) { // Check if thread was actually created
+    if (pthread_equal(pw_ctx->loop_thread, pthread_self())) {
+      // Called from the loop thread itself (e.g. an app violating the
+      // lost_cb contract by stopping synchronously from the callback):
+      // joining would self-deadlock. Leave the join to a later call from
+      // another thread.
+      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                 "PW Loopback: StopCapture called from the loop thread — "
+                 "skipping self-join (see MiniAVContextLostCallback docs).");
+      return MINIAV_ERROR_INVALID_OPERATION;
+    }
     miniav_log(MINIAV_LOG_LEVEL_DEBUG,
                "PW Loopback: Joining PipeWire loop thread.");
-    pthread_join(pw_ctx->loop_thread, NULL);
+    if (miniav_timed_join(pw_ctx->loop_thread, 5000) != 0) {
+      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                 "PW Loopback: loop thread did not exit within 5s — "
+                 "deferring (a later Stop/Destroy will retry the join).");
+      return MINIAV_ERROR_TIMEOUT; // loop_thread left set for retry
+    }
     pw_ctx->loop_thread = 0; // Mark as joined
   }
   pw_ctx->loop_running = false; // Ensure this is false after join
@@ -835,6 +870,16 @@ static void on_stream_state_changed(void *data, enum pw_stream_state old,
   case PW_STREAM_STATE_ERROR:
     miniav_log(MINIAV_LOG_LEVEL_ERROR, "PW Loopback: Stream error: %s",
                error ? error : "Unknown error");
+    // Tell the app the stream is gone instead of letting buffers silently
+    // stop (mirrors WASAPI's AUDCLNT_E_DEVICE_INVALIDATED -> lost_cb path).
+    // NOTE: fires on the PipeWire loop thread — see the
+    // MiniAVContextLostCallback contract (no synchronous Stop/Destroy).
+    if (pw_ctx->is_streaming && pw_ctx->parent_ctx &&
+        pw_ctx->parent_ctx->lost_cb &&
+        !atomic_exchange(&pw_ctx->lost_cb_fired, true)) {
+      pw_ctx->parent_ctx->lost_cb((int)MINIAV_ERROR_DEVICE_LOST,
+                                  pw_ctx->parent_ctx->lost_cb_user_data);
+    }
     pw_ctx->is_streaming = false;
     if (pw_ctx->loop_running && pw_ctx->loop && pw_ctx->wakeup_pipe[1] != -1) {
       write(pw_ctx->wakeup_pipe[1], "q", 1);
@@ -882,7 +927,7 @@ static void on_stream_param_changed(void *data, uint32_t id,
     return;
   }
 
-  MiniAVAudioInfo negotiated_format;
+  MiniAVAudioInfo negotiated_format = {0};
   negotiated_format.format = spa_audio_format_to_miniav(info.format);
   negotiated_format.channels = info.channels;
   negotiated_format.sample_rate = info.rate;
@@ -892,9 +937,13 @@ static void on_stream_param_changed(void *data, uint32_t id,
                "PW Loopback: Negotiated format: %s, %uHz, %uch.",
                spa_debug_type_find_name(spa_type_audio_format, info.format),
                info.rate, info.channels);
-    // if (pw_ctx) { // Check if pw_ctx is valid before using
-    //   pw_ctx->configured_video_format = negotiated_format;
-    // }
+    // Persist what the graph ACTUALLY negotiated so delivered buffers and
+    // get_configured_video_format() report the real format (buffers used to
+    // be stamped with the original request even when PipeWire negotiated a
+    // different rate/layout).
+    if (pw_ctx) {
+      pw_ctx->configured_video_format = negotiated_format;
+    }
   } else {
     miniav_log(
         MINIAV_LOG_LEVEL_WARN,
@@ -915,31 +964,61 @@ static void on_stream_process(void *data) {
     struct spa_buffer *spa_buf = pw_buf->buffer;
     struct spa_data *spa_d = &spa_buf->datas[0]; // Assuming single plane audio
 
-    if (spa_d->data && spa_d->chunk && spa_d->chunk->size > 0) {
-      // Allocate the MiniAVBuffer on the heap
+    if (spa_d->data && spa_d->chunk && spa_d->chunk->size > 0 &&
+        miniav_dispatch_guard_acquire_if_enabled()) {
+      // Copy the PCM out of PipeWire's buffer and attach the release payload
+      // (mirrors the WASAPI path, loopback_context_win_wasapi.c:277-311).
+      // The pw_buf memory is requeued to PipeWire right below and reused for
+      // the next quantum, so delivering a pointer into it would be a
+      // use-after-free for any consumer that holds the buffer across an
+      // async boundary — which the Dart FFI layer always does. The payload
+      // is what makes MiniAV_ReleaseBuffer able to free the copy + buffer
+      // (previously every delivery leaked).
+      //
+      // The dispatch guard is acquired BEFORE allocating and held across the
+      // callback: when callbacks are disabled (MiniAV_Dispose mid hot
+      // restart) nothing is allocated — otherwise every quantum would leak a
+      // payload nobody can ever release.
+      const size_t audio_bytes = spa_d->chunk->size;
+      MiniAVNativeBufferInternalPayload *payload =
+          (MiniAVNativeBufferInternalPayload *)miniav_calloc(
+              1, sizeof(MiniAVNativeBufferInternalPayload));
       MiniAVBuffer *buffer =
           (MiniAVBuffer *)miniav_calloc(1, sizeof(MiniAVBuffer));
-      if (!buffer) {
+      void *audio_copy = miniav_calloc(1, audio_bytes);
+      if (!payload || !buffer || !audio_copy) {
         miniav_log(MINIAV_LOG_LEVEL_ERROR,
-                   "PW Loopback: Failed to allocate MiniAVBuffer");
+                   "PW Loopback: OOM allocating audio buffer payload.");
+        miniav_free(payload);
+        miniav_free(buffer);
+        miniav_free(audio_copy);
+        miniav_dispatch_guard_release();
         pw_stream_queue_buffer(pw_ctx->stream, pw_buf);
         continue;
       }
+      memcpy(audio_copy, (uint8_t *)spa_d->data + spa_d->chunk->offset,
+             audio_bytes);
 
-      // Initialize the buffer with direct pointer to PipeWire data
       buffer->type = MINIAV_BUFFER_TYPE_AUDIO;
+      buffer->content_type = MINIAV_BUFFER_CONTENT_TYPE_CPU;
       buffer->timestamp_us = miniav_get_time_us();
       buffer->user_data = pw_ctx->app_user_data;
-      buffer->data_size_bytes = spa_d->chunk->size;
-
-      // Point directly to PipeWire's audio data (no copy needed)
+      buffer->data_size_bytes = audio_bytes;
       buffer->data.audio.info = pw_ctx->configured_video_format;
-      buffer->data.audio.data = spa_d->data + spa_d->chunk->offset;
+      buffer->data.audio.data = audio_copy;
+
+      payload->handle_type = MINIAV_NATIVE_HANDLE_TYPE_AUDIO;
+      payload->context_owner = pw_ctx->parent_ctx;
+      payload->native_singular_resource_ptr = audio_copy;
+      payload->parent_miniav_buffer_ptr = buffer;
+      buffer->internal_handle = payload;
 
       pw_ctx->app_callback(buffer, pw_ctx->app_user_data);
+      miniav_dispatch_guard_release();
     }
 
-    // Return the PipeWire buffer immediately after callback
+    // Return the PipeWire buffer immediately after callback — the delivered
+    // MiniAVBuffer owns a private copy, so this is now safe.
     pw_stream_queue_buffer(pw_ctx->stream, pw_buf);
   }
 }

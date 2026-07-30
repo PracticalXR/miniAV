@@ -1,0 +1,88 @@
+# Cross-platform configure+build matrix for miniav_c.
+#
+# Purpose: catch platform-gate regressions (bare __linux__/__APPLE__ gates,
+# missing backend files named in CMakeLists) on every push — the desktop legs
+# also compile-check the shared modules (audio/camera/screen/loopback/input).
+# No runtime tests here: runners have no cameras/displays/audio endpoints;
+# behavioral coverage lives in the Dart suites (miniav_tools/miniav_recorder).
+name: native-build
+
+on:
+  push:
+    paths:
+      - "miniav_ffi/miniav_c/**"
+      - ".github/workflows/native-build.yml"
+  pull_request:
+    paths:
+      - "miniav_ffi/miniav_c/**"
+      - ".github/workflows/native-build.yml"
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: miniav_ffi/miniav_c
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          # libpipewire: camera/screen/loopback backends; libglib2.0-dev
+          # provides gio-unix-2.0 for the portal path.
+          sudo apt-get install -y libpipewire-0.3-dev libglib2.0-dev
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (arm64-v8a, API 24)
+        # API 24 = libcamera2ndk link floor; runtime gates cover newer APIs.
+        run: >
+          cmake -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake
+          -DANDROID_ABI=arm64-v8a
+          -DANDROID_PLATFORM=android-24
+      - name: Build
+        run: cmake --build build --parallel
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure (device arm64)
+        # Unix Makefiles (not Xcode) so the unsigned shared lib builds
+        # without a signing identity.
+        run: >
+          cmake -B build
+          -G "Unix Makefiles"
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_SYSTEM_NAME=iOS
+          -DCMAKE_OSX_ARCHITECTURES=arm64
+      - name: Build
+        run: cmake --build build --parallel

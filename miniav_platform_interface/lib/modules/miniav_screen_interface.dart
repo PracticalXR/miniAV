@@ -13,6 +13,23 @@ abstract class MiniScreenPlatformInterface {
 
   /// Create a screen capture context (for capture/configuration).
   Future<MiniScreenContextPlatformInterface> createContext();
+
+  /// Subscribe to display add/remove notifications.
+  void Function() addDisplayChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => throw UnsupportedError('Display-change subscription not supported.');
+
+  /// Subscribe to window add/remove notifications.
+  void Function() addWindowChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => throw UnsupportedError('Window-change subscription not supported.');
+
+  /// iOS only: register the App Group ID shared between the app and its
+  /// Broadcast Upload Extension. Must be called before configuring the
+  /// `system_screen_broadcast` pseudo-display. On every other platform the
+  /// native layer reports not-supported.
+  Future<void> setIOSAppGroup(String appGroupId) =>
+      throw UnsupportedError('setIOSAppGroup is only available on iOS.');
 }
 
 /// Abstract screen context for configuring and capturing from a screen or window.
@@ -33,6 +50,13 @@ abstract class MiniScreenContextPlatformInterface {
 
   Future<ScreenFormatDefaults> getConfiguredFormats();
 
+  /// Include the mouse cursor in captured frames (off by default). Must be
+  /// called BEFORE configuring the display/window. Honored on Windows WGC,
+  /// macOS ScreenCaptureKit, and Linux PipeWire; Windows DXGI cannot draw the
+  /// cursor and stays cursor-less.
+  Future<void> setCaptureCursor(bool enabled) =>
+      throw UnsupportedError('setCaptureCursor is not supported.');
+
   /// Start screen capture.
   /// [onFrame] is called for each frame received.
   Future<void> startCapture(
@@ -45,4 +69,9 @@ abstract class MiniScreenContextPlatformInterface {
 
   /// Destroy this screen context and release resources.
   Future<void> destroy();
+
+  /// Subscribe to a one-shot lost notification (e.g. the captured display
+  /// was disconnected or the captured window was closed).
+  void Function() addLostListener(MiniAVContextLostListener listener) =>
+      throw UnsupportedError('Context-lost subscription not supported.');
 }

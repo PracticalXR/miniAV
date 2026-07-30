@@ -89,10 +89,30 @@ class MiniAVWebCameraPlatform implements MiniCameraPlatformInterface {
   Future<MiniCameraContextPlatformInterface> createContext() async {
     return MiniAVWebCameraContext();
   }
+
+  static final _WebDeviceChangeWatcher _watcher = _WebDeviceChangeWatcher(
+    kind: 'videoinput',
+    deviceFactory: (info, isDefault) => MiniAVDeviceInfo(
+      deviceId: info.deviceId,
+      name: info.label.isNotEmpty ? info.label : 'Camera',
+      isDefault: isDefault,
+    ),
+  );
+
+  @override
+  void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => _watcher.add(listener);
 }
 
 /// Web implementation of [MiniCameraContextPlatformInterface]
 class MiniAVWebCameraContext implements MiniCameraContextPlatformInterface {
+  @override
+  void Function() addLostListener(MiniAVContextLostListener listener) {
+    // Web cameras can be revoked but we don't currently propagate that.
+    return () {};
+  }
+
   // Media & elements
   web.MediaStream? _mediaStream;
   web.HTMLVideoElement? _videoElement;

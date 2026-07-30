@@ -6,11 +6,22 @@ import 'package:miniav_platform_interface/modules/miniav_audio_input_interface.d
 import 'package:miniav_platform_interface/miniav_platform_types.dart';
 
 import '../miniav_ffi_bindings.dart' as bindings;
+import '../miniav_ffi_subscriptions.dart';
 import '../miniav_ffi_types.dart';
 
 /// FFI implementation of [MiniAudioInputPlatformInterface].
 class MiniAVFFIAudioInputPlatform extends MiniAudioInputPlatformInterface {
   MiniAVFFIAudioInputPlatform();
+
+  static final FFIDeviceChangeRegistry _deviceChangeRegistry =
+      FFIDeviceChangeRegistry(
+        setCallback: bindings.MiniAV_Audio_SetDeviceChangeCallback,
+      );
+
+  @override
+  void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => _deviceChangeRegistry.add(listener);
 
   @override
   Future<List<MiniAVDeviceInfo>> enumerateDevices() async {
@@ -141,6 +152,7 @@ class MiniAVFFIAudioInputContextPlatform
     extends MiniAudioInputContextPlatformInterface {
   bindings.MiniAVAudioContextHandle? _contextHandle;
   ffi.NativeCallable<bindings.MiniAVBufferCallbackFunction>? _callbackHandle;
+  FFIContextLostRegistry<bindings.MiniAVAudioContextHandle>? _lostRegistry;
   bool _isDestroyed = false;
   late final Finalizer<bindings.MiniAVAudioContextHandle> _finalizer;
 
@@ -231,9 +243,17 @@ class MiniAVFFIAudioInputContextPlatform
       ffi.Pointer<bindings.MiniAVBuffer> buffer,
       ffi.Pointer<ffi.Void> cbUserData,
     ) {
-      // Check if context was destroyed during callback
+      // Check if context was destroyed during callback.
+      // Still release the heap-allocated buffer to avoid a memory leak — the
+      // C capture thread may have allocated heap_buf/audio_copy before the
+      // dispatch guard was disabled, then queued this event while Dart was
+      // processing destroy().
       if (_isDestroyed) {
-        return; // Silently ignore if destroyed
+        final handle = buffer.ref.internal_handle;
+        if (handle != ffi.nullptr) {
+          bindings.MiniAV_ReleaseBuffer(handle);
+        }
+        return;
       }
 
       final platformBuffer = MiniAVBufferFFI.fromPointer(buffer);
@@ -301,6 +321,9 @@ class MiniAVFFIAudioInputContextPlatform
 
     await stopCapture(); // Stop capture if running
 
+    _lostRegistry?.dispose();
+    _lostRegistry = null;
+
     if (_contextHandle != null) {
       _finalizer.detach(this); // Prevent finalizer from running
       final res = bindings.MiniAV_Audio_DestroyContext(_contextHandle!);
@@ -310,5 +333,17 @@ class MiniAVFFIAudioInputContextPlatform
         throw Exception('Failed to destroy audio input context: ${res.name}');
       }
     }
+  }
+
+  @override
+  void Function() addLostListener(MiniAVContextLostListener listener) {
+    if (_isDestroyed || _contextHandle == null) {
+      throw StateError('Cannot add lost listener on a destroyed context.');
+    }
+    _lostRegistry ??= FFIContextLostRegistry<bindings.MiniAVAudioContextHandle>(
+      context: _contextHandle!,
+      setCallback: bindings.MiniAV_Audio_SetContextLostCallback,
+    );
+    return _lostRegistry!.add(listener);
   }
 }

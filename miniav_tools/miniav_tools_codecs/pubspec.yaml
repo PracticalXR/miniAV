@@ -1,0 +1,44 @@
+name: miniav_tools_codecs
+description: First-party codecs for miniav_tools — GPU-compute (WGSL via minigpu), hardware (Media Foundation / vendor SDKs), and audio. FFmpeg is the software/container fallback.
+version: 0.6.0
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  miniav_tools_platform_interface: 0.5.2
+  miniav_platform_interface: ^0.5.10
+  minigpu_platform_interface: ^1.5.7
+  minigpu: ^1.5.7
+  # Web (WebCodecs + MSE) codec backend — see lib/web.dart. Only used on web.
+  web: ^1.1.0
+  gpu_tensor: ^1.5.7
+  gpu_pipeline: ^1.5.7
+  meta: ^1.16.0
+  # FFI bindings to the first-party native codecs lib (Opus + Media Foundation).
+  ffi: ^2.1.4
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.25.0
+  image: ^4.5.0
+  benchmark_harness: ^2.3.1
+  # Native-assets build-hook deps (build `native/` → miniav_tools_codecs_native).
+  code_assets: ^1.2.1
+  hooks: ^2.0.2
+  logging: ^1.2.0
+  native_toolchain_cmake: ^0.2.7
+  # Test-only: FFmpeg encoder to produce H.264 test packets for the MF decode
+  # tests (no cycle — miniav_tools_ffmpeg does not depend on codecs).
+  miniav_tools_ffmpeg: ^0.5.2
+  # Test-only: the facade, to prove the negotiator selects the FFmpeg-free
+  # MF + Opus backends over FFmpeg (ffmpeg_free_path_test.dart).
+  miniav_tools: ^0.5.2
+
+# Bundles the WASM codecs module (libopus compiled to WebAssembly) for web. The
+# files live under lib/web/ and are served to apps at
+# assets/packages/miniav_tools_codecs/web/… (see CodecsWasm._glueUrl). Honoured
+# by the Flutter build even though this is a pure-Dart package.
+flutter:
+  assets:
+    - packages/miniav_tools_codecs/web/miniav_codecs.js
+    - packages/miniav_tools_codecs/web/miniav_codecs.wasm

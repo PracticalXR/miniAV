@@ -1,0 +1,25 @@
+name: miniav_recorder
+description: High-level multi-source A/V recorder built on miniav + miniav_tools. Sync screen/camera/mic/loopback into MP4/MKV files or chunked streams.
+version: 0.5.2
+repository: https://github.com/PracticalXR/miniav_tools/tree/master/miniav_recorder
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  miniav: ^0.5.10
+  miniav_platform_interface: ^0.5.10
+  miniav_tools: 0.5.2
+  miniav_tools_ffmpeg: 0.5.2
+  miniav_tools_platform_interface: 0.5.2
+  # Optional GPU runtime used for the zero-copy screen path. Pulled in
+  # unconditionally so the recorder can lazily request a shared D3D11
+  # device on Windows; on other platforms it just sits unused.
+  # ^1.5.6: preferCaptureAdapter() needs Minigpu.preferDisplayAdapter (1.5.6).
+  minigpu: ^1.5.7
+  # Canonical GPU/CPU colour converters (RGBA->YUV420) live here now.
+  miniav_tools_codecs: ^0.6.0
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.31.0

@@ -24,6 +24,12 @@ class MiniCamera {
     final context = await _platform.createContext();
     return MiniCameraContext._(context);
   }
+
+  /// Subscribe to camera-device add/remove notifications.
+  /// Returns a disposer that must be called to unsubscribe.
+  static void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => _platform.addDeviceChangeListener(listener);
 }
 
 /// Camera capture context for configuration and capture operations
@@ -52,4 +58,11 @@ class MiniCameraContext {
 
   /// Destroy the context and release resources
   Future<void> destroy() => _context.destroy();
+
+  /// Subscribe to a context-lost notification (e.g. the camera being captured
+  /// was unplugged or otherwise became unavailable). Fired from a capture
+  /// thread; do NOT call [destroy] synchronously from inside the listener.
+  /// Returns a disposer that must be called to unsubscribe.
+  void Function() addLostListener(MiniAVContextLostListener listener) =>
+      _context.addLostListener(listener);
 }

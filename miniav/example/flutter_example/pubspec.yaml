@@ -32,6 +32,8 @@ dependencies:
     sdk: flutter
   miniav:
     path: ../../
+  minigpu_view:
+    path: ../../../../minigpu/minigpu_view
 
 
   # The following adds the Cupertino Icons font to your application.

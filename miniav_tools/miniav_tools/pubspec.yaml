@@ -1,0 +1,14 @@
+name: miniav_tools
+description: Cross-platform audio/video codec & container facade with zero-copy GPU buffer support.
+version: 0.5.2
+repository: https://github.com/PracticalXR/miniav_tools/tree/master/miniav_tools
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  miniav_tools_platform_interface: 0.5.2
+
+dev_dependencies:
+  lints: ^5.0.0
+  test: ^1.31.0

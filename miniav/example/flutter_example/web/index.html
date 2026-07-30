@@ -33,6 +33,17 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
+  <!--
+    Establish cross-origin isolation (SharedArrayBuffer) BEFORE Flutter boots.
+    Required by the miniav AudioWorklet WASM audio build. On hosts that set real
+    COOP/COEP response headers (see firebase.json) this is a no-op; otherwise it
+    installs a service worker and reloads once into an isolated context. For a
+    local dev server you can instead pass:
+      flutter run -d chrome \
+        --web-header=Cross-Origin-Opener-Policy=same-origin \
+        --web-header=Cross-Origin-Embedder-Policy=require-corp
+  -->
+  <script src="coi-serviceworker.js"></script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

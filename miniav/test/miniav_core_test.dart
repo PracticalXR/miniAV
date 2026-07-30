@@ -58,6 +58,12 @@ void main() {
         expect(loopback, isNotNull);
       });
 
+      test('should provide input instance', () {
+        final input = MiniAV.input;
+        expect(input, isA<MiniInput>());
+        expect(input, isNotNull);
+      });
+
       test('should return same instance on multiple calls', () {
         final camera1 = MiniAV.camera;
         final camera2 = MiniAV.camera;
@@ -118,6 +124,7 @@ void main() {
         expect(MiniAV.screen, isNotNull);
         expect(MiniAV.audioInput, isNotNull);
         expect(MiniAV.loopback, isNotNull);
+        expect(MiniAV.input, isNotNull);
       });
 
       test('should handle platform method calls', () async {
@@ -145,6 +152,11 @@ void main() {
 
         expect(
           () async => await MiniLoopback.enumerateDevices(),
+          returnsNormally,
+        );
+
+        expect(
+          () async => await MiniInput.enumerateGamepads(),
           returnsNormally,
         );
       });

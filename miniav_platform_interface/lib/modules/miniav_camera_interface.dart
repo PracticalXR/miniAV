@@ -13,6 +13,14 @@ abstract class MiniCameraPlatformInterface {
 
   /// Create a camera context (for capture/configuration).
   Future<MiniCameraContextPlatformInterface> createContext();
+
+  /// Subscribe to camera-device add/remove notifications. The returned
+  /// disposer must be called to unsubscribe.
+  /// Default implementation throws [UnsupportedError]; platform
+  /// implementations should override.
+  void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => throw UnsupportedError('Device-change subscription not supported.');
 }
 
 /// Abstract camera context for configuring and capturing from a camera.
@@ -34,4 +42,11 @@ abstract class MiniCameraContextPlatformInterface {
 
   /// Destroy this camera context and release resources.
   Future<void> destroy();
+
+  /// Subscribe to a one-shot lost notification for this context (the device
+  /// being captured was unplugged or otherwise became unavailable). The
+  /// returned disposer must be called to unsubscribe (or the listener cleans
+  /// itself up on context destroy).
+  void Function() addLostListener(MiniAVContextLostListener listener) =>
+      throw UnsupportedError('Context-lost subscription not supported.');
 }

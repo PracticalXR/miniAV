@@ -8,6 +8,8 @@ final sourceDir = Directory('./miniav_c');
 
 void main(List<String> args) async {
   await build(args, (input, output) async {
+    if (!input.config.buildCodeAssets) return;
+
     Logger logger = Logger('build');
     await runBuild(input, output, sourceDir.absolute.uri);
     final miniavLib = await output.findAndAddCodeAssets(

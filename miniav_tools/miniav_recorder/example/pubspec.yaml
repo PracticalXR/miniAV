@@ -1,0 +1,21 @@
+name: miniav_recorder_example
+description: >
+  Example for the miniav_recorder package — records screen + system-audio
+  loopback into an MP4 file and prints a live packet counter.
+publish_to: none
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  miniav: ^0.5.3
+  miniav_ffi: ^0.5.3
+  miniav_platform_interface: ^0.5.3
+
+  miniav_tools: ^0.1.0
+  miniav_tools_ffmpeg: ^0.1.0
+  miniav_tools_platform_interface: ^0.1.0
+  miniav_recorder: ^0.1.0
+
+dev_dependencies:
+  test: ^1.25.0

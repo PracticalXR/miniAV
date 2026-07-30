@@ -1,17 +1,27 @@
 name: miniav_web
 description: A web implementation of the miniav library.
-version: 0.4.5
-publish_to: none
+version: 0.7.0
 repository: https://github.com/PracticalXR/miniAV/tree/master/miniav_web
 
 environment:
-  sdk: ^3.9.0-21.0.dev
+  sdk: ^3.11.4
+  flutter: ">=3.3.0"
 
 dependencies:
-  miniav_platform_interface:
-    path: ../miniav_platform_interface
+  miniav_platform_interface: 0.7.0
   web: ^1.1.1
+  flutter:
+    sdk: flutter
 
 dev_dependencies:
   lints: ^5.0.0
-  test: ^1.24.0
+  test: ^1.31.0
+
+# Bundles the miniav WASM audio module (miniaudio compiled to WebAssembly).
+# Files live under lib/web/ and are served to apps at
+# assets/packages/miniav_web/web/… (see MiniavWasm._glueUrl).
+
+flutter:
+  assets:
+    - packages/miniav_web/web/miniav_web.js
+    - packages/miniav_web/web/miniav_web.wasm

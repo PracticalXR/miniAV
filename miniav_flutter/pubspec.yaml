@@ -1,0 +1,31 @@
+name: miniav_flutter
+description: Flutter companion for miniav. Re-exports the full miniav API and auto-registers a WidgetsBindingObserver that calls MiniAV.dispose() on hot restart, preventing "Callback invoked after it has been deleted" crashes.
+version: 0.7.0
+repository: https://github.com/PracticalXR/miniAV/tree/master/miniav_flutter
+
+environment:
+  sdk: ^3.11.4
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  miniav: 0.7.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  lints: ^5.0.0
+
+flutter:
+  plugin:
+    platforms:
+      # Android: MediaProjection consent helper (Kotlin MethodChannel + typed
+      # foreground service + JNI handoff to the pure-FFI native layer). Camera,
+      # mic, and screen frames themselves come through miniav_ffi (dart:ffi) —
+      # this plugin piece only supplies the consent seam. iOS is intentionally
+      # absent in v1 (camera/mic permission is Info.plist + app-side; ReplayKit
+      # needs no plugin).
+      android:
+        package: com.practicalxr.miniav_flutter
+        pluginClass: MiniavFlutterPlugin

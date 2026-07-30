@@ -1,0 +1,19 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.practicalxr.miniav_flutter">
+
+    <!-- Required to run a mediaProjection-typed foreground service. Android 14
+         (API 34) mandates that the mediaProjection-typed FGS be RUNNING before
+         MediaProjectionManager.getMediaProjection() is called. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+
+    <application>
+        <!-- Typed foreground service that keeps the screen-capture session
+             alive. The foregroundServiceType MUST be "mediaProjection" (API 29+
+             convention, mandatory typed attribute on API 34+). -->
+        <service
+            android:name=".MiniavScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+    </application>
+</manifest>

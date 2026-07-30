@@ -1,5 +1,6 @@
 #include "camera_context_macos_avf.h"
 #include "../../common/miniav_logging.h" // For miniav_log
+#include "../../common/miniav_time.h"    // For miniav_rebase_time_us
 #include "../../common/miniav_utils.h"   // For miniav_calloc, miniav_free, etc.
 #include "../../../include/miniav_buffer.h" // For MiniAVNativeBufferInternalPayload, MiniAVBufferContentType
 
@@ -8,6 +9,13 @@
 #import <CoreVideo/CoreVideo.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h> // For Metal types
+
+#include <atomic> // one-shot lost_cb guard (observers race on two threads)
+
+// Queue-specific tag so stop/destroy can detect being called ON
+// videoOutputQueue (from inside a frame callback) and skip the dispatch_sync
+// drain that would otherwise self-deadlock.
+static const void* kMiniAVVideoOutputQueueKey = &kMiniAVVideoOutputQueueKey;
 
 // --- Forward Declarations ---
 @class MiniAVCaptureDelegate;
@@ -25,7 +33,30 @@ typedef struct AVFPlatformContext {
     id<MTLDevice> metalDevice;
     CVMetalTextureCacheRef textureCache;
 
+    // GPU-fence signalling for the zero-copy Metal path. Lazily created on the
+    // videoOutputQueue (single serial producer) the first time the GPU path
+    // signals a frame. metalSharedEvent is an id<MTLSharedEvent> (macOS 10.14+);
+    // metalCommandQueue submits the encodeSignalEvent commit. metalFenceValue is
+    // a per-context monotonically incrementing counter (last value signalled).
+    // Best-effort: if MTLSharedEvent is unavailable these stay nil/0 and the
+    // buffer's native_fence is left zeroed (the CVMetalTextureCache already
+    // serializes texture use on this same device).
+    id<MTLSharedEvent> metalSharedEvent API_AVAILABLE(macos(10.14));
+    id<MTLCommandQueue> metalCommandQueue;
+    uint64_t metalFenceValue;
+
     MiniAVCaptureDelegate *captureDelegate;
+
+    // Rebases CMSampleBuffer presentation timestamps (session/device clock)
+    // onto the shared miniav_get_time_us() epoch (reset at start_capture).
+    MiniAVTimebase timebase;
+
+    // Device-lost notification wiring (see macos_avf_start_capture).
+    id runtimeErrorObserver;
+    id disconnectObserver;
+    // Atomic: the runtime-error and disconnect observers fire on independent
+    // arbitrary threads and can race on a real hot-unplug.
+    std::atomic<bool> lost_cb_fired;
 
 } AVFPlatformContext;
 
@@ -268,6 +299,23 @@ static MTLPixelFormat CVPixelFormatToMTLPixelFormat(OSType cvPixelFormat) {
     }
 }
 
+// native_fence for the zero-copy Metal path.
+//
+// The delivered CVMetalTextureCache textures ALIAS the capture IOSurface
+// directly — no GPU copy is enqueued on our side. Signalling an MTLSharedEvent
+// from an empty command buffer (as an earlier version did) would NOT order the
+// camera's write of the IOSurface against a consumer that waits on the event:
+// the event could signal before the surface is safe to read, so the "fence"
+// was misleading dead weight. CoreVideo/IOSurface already serialise access to
+// the shared surface, so we honour the "no fence" contract and leave
+// native_fence zeroed. (If a future consumer needs an explicit barrier, the
+// command buffer must actually touch the textures via a blit/useResource so
+// encodeSignalEvent orders after real GPU work.)
+static void avf_populate_metal_fence(AVFPlatformContext* platCtx, MiniAVBuffer* buffer) {
+    MINIAV_UNUSED(platCtx);
+    MINIAV_UNUSED(buffer);
+}
+
 // --- AVFoundation Delegate for Video Output ---
 @interface MiniAVCaptureDelegate : NSObject <AVCaptureVideoDataOutputSampleBufferDelegate>
 {
@@ -347,10 +395,8 @@ static MTLPixelFormat CVPixelFormatToMTLPixelFormat(OSType cvPixelFormat) {
         OSType cv_pixel_format_type = CVPixelBufferGetPixelFormatType(imageBuffer);
         MTLPixelFormat mtlPixelFormat = CVPixelFormatToMTLPixelFormat(cv_pixel_format_type);
 
-        // For planar formats like NV12, this simple mapping won't work directly for a single texture.
-        // It would require creating separate textures for Y and UV planes.
-        // This example prioritizes common non-planar formats for simplicity.
         if (mtlPixelFormat != MTLPixelFormatInvalid && !CVPixelBufferIsPlanar(imageBuffer)) {
+            // --- Packed (non-planar) RGB path: single Metal texture. ---
             CVMetalTextureRef metalTextureRef = NULL;
             CVReturn err = CVMetalTextureCacheCreateTextureFromImage(
                 kCFAllocatorDefault, platCtx->textureCache, imageBuffer, NULL,
@@ -367,7 +413,7 @@ static MTLPixelFormat CVPixelFormatToMTLPixelFormat(OSType cvPixelFormat) {
                     mavBuffer_ptr->data.video.info.height = [texture height];
                     mavBuffer_ptr->data.video.info.pixel_format = FourCCToMiniAVPixelFormat(cv_pixel_format_type);
                     mavBuffer_ptr->data_size_bytes = total_data_size;
-                    
+
                     // Use unified plane structure for GPU
                     mavBuffer_ptr->data.video.num_planes = 1;
                     mavBuffer_ptr->data.video.planes[0].data_ptr = (void*)texture; // Pass non-retained id<MTLTexture>
@@ -376,7 +422,10 @@ static MTLPixelFormat CVPixelFormatToMTLPixelFormat(OSType cvPixelFormat) {
                     mavBuffer_ptr->data.video.planes[0].stride_bytes = 0; // Not applicable for GPU texture
                     mavBuffer_ptr->data.video.planes[0].offset_bytes = 0;
                     mavBuffer_ptr->data.video.planes[0].subresource_index = 0;
-                    
+
+                    // Best-effort GPU fence (see avf_populate_metal_fence).
+                    avf_populate_metal_fence(platCtx, mavBuffer_ptr);
+
                     gpu_path_successful = true;
                     miniav_log(MINIAV_LOG_LEVEL_DEBUG, "AVF: GPU Path - Metal texture created.");
                 } else {
@@ -386,6 +435,105 @@ static MTLPixelFormat CVPixelFormatToMTLPixelFormat(OSType cvPixelFormat) {
             } else {
                 miniav_log(MINIAV_LOG_LEVEL_WARN, "AVF: GPU Path - CVMetalTextureCacheCreateTextureFromImage failed (err: %d). Falling back to CPU.", err);
             }
+        } else if (CVPixelBufferIsPlanar(imageBuffer) &&
+                   (cv_pixel_format_type == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+                    cv_pixel_format_type == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange ||
+                    cv_pixel_format_type == kCVPixelFormatType_420YpCbCr8Planar ||
+                    cv_pixel_format_type == kCVPixelFormatType_420YpCbCr8PlanarFullRange)) {
+            // --- Planar YUV path: one Metal texture per plane (zero-copy). ---
+            // NV12  : plane 0 (Y)  = R8Unorm  @ WxH,   plane 1 (CbCr) = RG8Unorm @ W/2 x H/2
+            // I420  : plane 0 (Y)  = R8Unorm  @ WxH,   plane 1 (Cb)   = R8Unorm  @ W/2 x H/2,
+            //         plane 2 (Cr) = R8Unorm  @ W/2 x H/2
+            // Per-plane widths/heights come from the CVPixelBuffer directly rather
+            // than being computed, so any device-specific subsampling is honoured.
+            bool is_nv12 = (cv_pixel_format_type == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
+                            cv_pixel_format_type == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange);
+            size_t planeCount = CVPixelBufferGetPlaneCount(imageBuffer);
+
+            CVMetalTextureRef planeTextureRefs[MINIAV_VIDEO_FORMAT_MAX_PLANES] = {0};
+            id<MTLTexture> planeTextures[MINIAV_VIDEO_FORMAT_MAX_PLANES] = {0};
+            bool all_planes_ok = (planeCount > 0 && planeCount <= MINIAV_VIDEO_FORMAT_MAX_PLANES);
+
+            for (size_t i = 0; all_planes_ok && i < planeCount; ++i) {
+                size_t plane_w = CVPixelBufferGetWidthOfPlane(imageBuffer, i);
+                size_t plane_h = CVPixelBufferGetHeightOfPlane(imageBuffer, i);
+                // NV12 chroma plane is 2-component (CbCr interleaved); everything
+                // else here is single-component 8-bit.
+                MTLPixelFormat planeMtlFormat = MTLPixelFormatR8Unorm;
+                if (is_nv12 && i == 1) {
+                    planeMtlFormat = MTLPixelFormatRG8Unorm;
+                }
+
+                CVMetalTextureRef planeTexRef = NULL;
+                CVReturn perr = CVMetalTextureCacheCreateTextureFromImage(
+                    kCFAllocatorDefault, platCtx->textureCache, imageBuffer, NULL,
+                    planeMtlFormat, plane_w, plane_h, i, &planeTexRef);
+
+                if (perr == kCVReturnSuccess && planeTexRef) {
+                    id<MTLTexture> planeTex = CVMetalTextureGetTexture(planeTexRef);
+                    if (planeTex) {
+                        planeTextureRefs[i] = planeTexRef; // owned; released on the release path
+                        planeTextures[i] = planeTex;       // autoreleased; lives as long as planeTexRef
+                    } else {
+                        miniav_log(MINIAV_LOG_LEVEL_WARN, "AVF: GPU Path - CVMetalTextureGetTexture failed for plane %zu.", i);
+                        CFRelease(planeTexRef);
+                        all_planes_ok = false;
+                    }
+                } else {
+                    miniav_log(MINIAV_LOG_LEVEL_WARN, "AVF: GPU Path - CVMetalTextureCacheCreateTextureFromImage failed for plane %zu (err: %d). Falling back to CPU.", i, perr);
+                    all_planes_ok = false;
+                }
+            }
+
+            if (all_planes_ok) {
+                // Retain the CVPixelBuffer once (keeps the plane storage alive)
+                // and store each per-plane CVMetalTextureRef for release.
+                CVBufferRetain(imageBuffer);
+                payload->native_singular_resource_ptr = (void*)imageBuffer;
+                for (size_t i = 0; i < planeCount; ++i) {
+                    payload->native_planar_resource_ptrs[i] = planeTextureRefs[i];
+                }
+                payload->num_planar_resources_to_release = (uint32_t)planeCount;
+
+                mavBuffer_ptr->content_type = MINIAV_BUFFER_CONTENT_TYPE_GPU_METAL_TEXTURE;
+                mavBuffer_ptr->data.video.info.width = (uint32_t)frame_width;
+                mavBuffer_ptr->data.video.info.height = (uint32_t)frame_height;
+                mavBuffer_ptr->data.video.info.pixel_format = FourCCToMiniAVPixelFormat(cv_pixel_format_type);
+                mavBuffer_ptr->data_size_bytes = total_data_size;
+
+                mavBuffer_ptr->data.video.num_planes = (uint32_t)planeCount;
+                for (size_t i = 0; i < planeCount; ++i) {
+                    mavBuffer_ptr->data.video.planes[i].data_ptr = (void*)planeTextures[i]; // non-retained id<MTLTexture>
+                    mavBuffer_ptr->data.video.planes[i].width = (uint32_t)[planeTextures[i] width];
+                    mavBuffer_ptr->data.video.planes[i].height = (uint32_t)[planeTextures[i] height];
+                    mavBuffer_ptr->data.video.planes[i].stride_bytes = 0; // Not applicable for GPU texture
+                    mavBuffer_ptr->data.video.planes[i].offset_bytes = 0;
+                    mavBuffer_ptr->data.video.planes[i].subresource_index = (uint32_t)i;
+                }
+
+                // Best-effort GPU fence (see avf_populate_metal_fence).
+                avf_populate_metal_fence(platCtx, mavBuffer_ptr);
+
+                gpu_path_successful = true;
+                miniav_log(MINIAV_LOG_LEVEL_DEBUG, "AVF: GPU Path - %zu-plane Metal texture set created (%s).",
+                           planeCount, is_nv12 ? "NV12" : "I420");
+            } else {
+                // Partial failure: release any plane textures already created so
+                // we don't leak, then fall through to the CPU path below.
+                for (size_t i = 0; i < planeCount; ++i) {
+                    if (planeTextureRefs[i]) {
+                        CFRelease(planeTextureRefs[i]);
+                        planeTextureRefs[i] = NULL;
+                    }
+                }
+            }
+        } else if (CVPixelBufferIsPlanar(imageBuffer)) {
+            // Planar but not an NV12/I420 layout we build multi-plane textures
+            // for (e.g. 10-bit YUV). Previously this downgraded to CPU silently;
+            // log it at DEBUG so the downgrade is observable.
+            miniav_log(MINIAV_LOG_LEVEL_DEBUG,
+                       "AVF: GPU Path - planar format '%.4s' not supported for zero-copy Metal upload; downgrading to CPU.",
+                       (char*)&cv_pixel_format_type);
         } else {
             miniav_log(MINIAV_LOG_LEVEL_DEBUG, "AVF: GPU Path - Source CVPixelBuffer format (%.4s) or planar status not suitable for simple Metal texture. Falling back to CPU.", (char*)&cv_pixel_format_type);
         }
@@ -435,7 +583,22 @@ static MTLPixelFormat CVPixelFormatToMTLPixelFormat(OSType cvPixelFormat) {
     }
 
     mavBuffer_ptr->type = MINIAV_BUFFER_TYPE_VIDEO;
-    mavBuffer_ptr->timestamp_us = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sampleBuffer)) * 1000000;
+    // The CMSampleBuffer PTS runs on the capture session/device clock with its
+    // own epoch. Convert to µs with integer math (no double rounding) and
+    // rebase onto the shared miniav_get_time_us() timeline so camera
+    // timestamps are comparable with the other tracks. Samples without a
+    // numeric PTS fall back to arrival time without touching the calibration.
+    {
+        AVFPlatformContext* tsPlatCtx = (AVFPlatformContext*)_miniAVCtx->platform_ctx;
+        CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
+        if (tsPlatCtx && CMTIME_IS_NUMERIC(pts)) {
+            CMTime ptsUs = CMTimeConvertScale(pts, 1000000, kCMTimeRoundingMethod_Default);
+            mavBuffer_ptr->timestamp_us =
+                miniav_rebase_time_us(&tsPlatCtx->timebase, (uint64_t)ptsUs.value);
+        } else {
+            mavBuffer_ptr->timestamp_us = miniav_get_time_us();
+        }
+    }
     mavBuffer_ptr->data.video.info.frame_rate_numerator = _miniAVCtx->configured_video_format.frame_rate_numerator;
     mavBuffer_ptr->data.video.info.frame_rate_denominator = _miniAVCtx->configured_video_format.frame_rate_denominator;
     mavBuffer_ptr->data.video.info.output_preference = _miniAVCtx->configured_video_format.output_preference;
@@ -450,6 +613,37 @@ static MTLPixelFormat CVPixelFormatToMTLPixelFormat(OSType cvPixelFormat) {
 @end
 
 
+// Removes the device-lost notification observers registered by
+// macos_avf_start_capture (safe to call when none are registered).
+static void avf_remove_lost_observers(AVFPlatformContext* platCtx) {
+    if (platCtx->runtimeErrorObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:platCtx->runtimeErrorObserver];
+        [platCtx->runtimeErrorObserver release];
+        platCtx->runtimeErrorObserver = nil;
+    }
+    if (platCtx->disconnectObserver) {
+        [[NSNotificationCenter defaultCenter] removeObserver:platCtx->disconnectObserver];
+        [platCtx->disconnectObserver release];
+        platCtx->disconnectObserver = nil;
+    }
+}
+
+// Fires the context-lost callback exactly once per capture run. Runs on the
+// thread posting the AVF notification — per the MiniAVContextLostCallback
+// contract the app must not synchronously Stop/Destroy from inside it.
+static void avf_fire_lost_cb(AVFPlatformContext* platCtx, const char* why) {
+    MiniAVCameraContext* parent = platCtx->parent_ctx;
+    if (!parent || !parent->lost_cb) {
+        return;
+    }
+    if (platCtx->lost_cb_fired.exchange(true)) {
+        return;
+    }
+    miniav_log(MINIAV_LOG_LEVEL_WARN, "AVF: Capture lost (%s) — notifying app.",
+               why);
+    parent->lost_cb((int)MINIAV_ERROR_DEVICE_LOST, parent->lost_cb_user_data);
+}
+
 // --- CameraContextInternalOps Implementations ---
 static MiniAVResultCode macos_avf_init_platform(MiniAVCameraContext* ctx) {
     if (!ctx || !ctx->platform_ctx) return MINIAV_ERROR_INVALID_ARG;
@@ -463,6 +657,9 @@ static MiniAVResultCode macos_avf_init_platform(MiniAVCameraContext* ctx) {
         }
         platCtx->sessionQueue = dispatch_queue_create("com.miniav.sessionQueue", DISPATCH_QUEUE_SERIAL);
         platCtx->videoOutputQueue = dispatch_queue_create("com.miniav.videoOutputQueue", DISPATCH_QUEUE_SERIAL);
+        // Tag the queue so drain sites can detect same-queue reentrancy.
+        dispatch_queue_set_specific(platCtx->videoOutputQueue, kMiniAVVideoOutputQueueKey,
+                                    (void*)1, NULL);
         platCtx->parent_ctx = ctx;
 
         // Initialize Metal device and texture cache
@@ -490,8 +687,18 @@ static MiniAVResultCode macos_avf_destroy_platform(MiniAVCameraContext* ctx) {
     AVFPlatformContext* platCtx = (AVFPlatformContext*)ctx->platform_ctx;
 
     @autoreleasepool {
+        avf_remove_lost_observers(platCtx);
         if (platCtx->captureSession && [platCtx->captureSession isRunning]) {
             [platCtx->captureSession stopRunning];
+        }
+
+        // Drain any in-flight sample-buffer delegate invocation BEFORE tearing
+        // the delegate/context down — the delegate thread dereferences the
+        // MiniAVCameraContext that our caller frees right after this returns.
+        // (Same-queue reentrancy guard as in stop_capture.)
+        if (platCtx->videoOutputQueue &&
+            dispatch_get_specific(kMiniAVVideoOutputQueueKey) == NULL) {
+            dispatch_sync(platCtx->videoOutputQueue, ^{});
         }
 
         if (platCtx->captureDelegate) {
@@ -531,6 +738,18 @@ static MiniAVResultCode macos_avf_destroy_platform(MiniAVCameraContext* ctx) {
             CVMetalTextureCacheFlush(platCtx->textureCache, 0);
             CFRelease(platCtx->textureCache);
             platCtx->textureCache = NULL;
+        }
+        // GPU-fence objects (created lazily on the GPU path). newSharedEvent /
+        // newCommandQueue return retained ("new...") objects under manual RR.
+        if (@available(macOS 10.14, *)) {
+            if (platCtx->metalSharedEvent) {
+                [platCtx->metalSharedEvent release];
+                platCtx->metalSharedEvent = nil;
+            }
+        }
+        if (platCtx->metalCommandQueue) {
+            [platCtx->metalCommandQueue release];
+            platCtx->metalCommandQueue = nil;
         }
         if (platCtx->metalDevice) {
             [platCtx->metalDevice release]; // Metal device was retained by MTLCreateSystemDefaultDevice implicitly
@@ -846,6 +1065,38 @@ static MiniAVResultCode macos_avf_start_capture(MiniAVCameraContext* ctx) {
     if (!platCtx->captureSession) return MINIAV_ERROR_NOT_INITIALIZED;
 
     @autoreleasepool {
+        // Fresh timestamp calibration + one-shot lost-notification guard per
+        // capture run.
+        memset(&platCtx->timebase, 0, sizeof(platCtx->timebase));
+        platCtx->lost_cb_fired = false;
+
+        // Device-lost wiring: without these observers a hot-unplug or session
+        // runtime error was completely silent (frames just stopped).
+        avf_remove_lost_observers(platCtx); // defensive: no double-registration
+        platCtx->runtimeErrorObserver = [[[NSNotificationCenter defaultCenter]
+            addObserverForName:AVCaptureSessionRuntimeErrorNotification
+                        object:platCtx->captureSession
+                         queue:nil
+                    usingBlock:^(NSNotification* note) {
+                      NSError* err = note.userInfo[AVCaptureSessionErrorKey];
+                      miniav_log(MINIAV_LOG_LEVEL_ERROR,
+                                 "AVF: Session runtime error: %s",
+                                 err ? err.localizedDescription.UTF8String
+                                     : "(unknown)");
+                      avf_fire_lost_cb(platCtx, "session runtime error");
+                    }] retain];
+        platCtx->disconnectObserver = [[[NSNotificationCenter defaultCenter]
+            addObserverForName:AVCaptureDeviceWasDisconnectedNotification
+                        object:nil
+                         queue:nil
+                    usingBlock:^(NSNotification* note) {
+                      AVCaptureDevice* dev = (AVCaptureDevice*)note.object;
+                      if (platCtx->deviceInput &&
+                          dev == platCtx->deviceInput.device) {
+                        avf_fire_lost_cb(platCtx, "device disconnected");
+                      }
+                    }] retain];
+
         if (![platCtx->captureSession isRunning]) {
             dispatch_async(platCtx->sessionQueue, ^{
                 [platCtx->captureSession startRunning];
@@ -864,13 +1115,25 @@ static MiniAVResultCode macos_avf_stop_capture(MiniAVCameraContext* ctx) {
     if (!platCtx->captureSession) return MINIAV_SUCCESS;
 
     @autoreleasepool {
+        avf_remove_lost_observers(platCtx);
         if ([platCtx->captureSession isRunning]) {
-            dispatch_sync(platCtx->sessionQueue, ^{ 
+            dispatch_sync(platCtx->sessionQueue, ^{
                 [platCtx->captureSession stopRunning];
                 miniav_log(MINIAV_LOG_LEVEL_INFO, "AVF: Capture session stopped.");
             });
         } else {
             miniav_log(MINIAV_LOG_LEVEL_WARN, "AVF: Capture session not running or already stopped.");
+        }
+        // Drain the delegate queue: the sample-buffer delegate runs on
+        // videoOutputQueue (not sessionQueue), so an in-flight frame callback
+        // could still be reading the context after stopRunning returns. The
+        // caller clears app_callback right after this returns — without the
+        // drain that's a use-after-clear race. Skip when ALREADY ON that
+        // queue (app calling stop from inside its own frame callback) —
+        // dispatch_sync onto the current serial queue would self-deadlock.
+        if (platCtx->videoOutputQueue &&
+            dispatch_get_specific(kMiniAVVideoOutputQueueKey) == NULL) {
+            dispatch_sync(platCtx->videoOutputQueue, ^{});
         }
     }
     return MINIAV_SUCCESS;
@@ -883,17 +1146,34 @@ static MiniAVResultCode macos_avf_release_buffer(MiniAVCameraContext* ctx, void*
     MiniAVNativeBufferInternalPayload* payload = (MiniAVNativeBufferInternalPayload*)native_buffer_payload_void;
     
     @autoreleasepool {
+        // Multi-plane GPU path (NV12/I420): one CVMetalTextureRef per plane is
+        // stored here, and native_singular_resource_ptr holds the retained
+        // CVPixelBuffer (NOT a CVMetalTextureRef) that backs their storage.
+        bool has_planar_metal_textures = (payload->num_planar_resources_to_release > 0);
+        if (has_planar_metal_textures) {
+            for (uint32_t i = 0; i < payload->num_planar_resources_to_release; ++i) {
+                if (payload->native_planar_resource_ptrs[i]) {
+                    CVMetalTextureRef metalTextureRef = (CVMetalTextureRef)payload->native_planar_resource_ptrs[i];
+                    CFRelease(metalTextureRef);
+                    miniav_log(MINIAV_LOG_LEVEL_DEBUG, "AVF: Released planar CVMetalTextureRef %u: %p", i, metalTextureRef);
+                    payload->native_planar_resource_ptrs[i] = NULL;
+                }
+            }
+            payload->num_planar_resources_to_release = 0;
+        }
+
         if (payload->native_singular_resource_ptr) {
-            MiniAVBufferContentType content_type = MINIAV_BUFFER_CONTENT_TYPE_CPU; 
+            MiniAVBufferContentType content_type = MINIAV_BUFFER_CONTENT_TYPE_CPU;
             if (payload->parent_miniav_buffer_ptr) { // Check parent buffer for actual content type
                 content_type = payload->parent_miniav_buffer_ptr->content_type;
             }
 
-            if (content_type == MINIAV_BUFFER_CONTENT_TYPE_GPU_METAL_TEXTURE) {
+            if (content_type == MINIAV_BUFFER_CONTENT_TYPE_GPU_METAL_TEXTURE && !has_planar_metal_textures) {
+                // Packed-RGB GPU path: singular resource IS a CVMetalTextureRef.
                 CVMetalTextureRef metalTextureRef = (CVMetalTextureRef)payload->native_singular_resource_ptr;
-                CFRelease(metalTextureRef); 
+                CFRelease(metalTextureRef);
                 miniav_log(MINIAV_LOG_LEVEL_DEBUG, "AVF: Released CVMetalTextureRef: %p", metalTextureRef);
-            } else { // Default to CPU / CVImageBufferRef
+            } else { // CPU path, or planar GPU path: singular resource is a CVImageBufferRef
                 CVImageBufferRef imageBuffer = (CVImageBufferRef)payload->native_singular_resource_ptr;
                 CVBufferRelease(imageBuffer);
                 miniav_log(MINIAV_LOG_LEVEL_DEBUG, "AVF: Released CVImageBufferRef: %p", imageBuffer);

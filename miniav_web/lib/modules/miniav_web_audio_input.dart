@@ -1,20 +1,26 @@
 part of '../miniav_web.dart';
 
-/// Web implementation of [MiniAudioInputPlatformInterface]
+/// Web implementation of [MiniAudioInputPlatformInterface] backed by the miniav
+/// WASM module (miniaudio compiled to WebAssembly). Capture goes through
+/// miniaudio's Web Audio (ScriptProcessorNode) backend into an internal f32
+/// ring; Dart drains it on a poll timer — the same first-party miniaudio path
+/// used natively, replacing the previous hand-rolled Web-Audio-API capture.
+///
+/// Device enumeration still uses the browser (getUserMedia + enumerateDevices)
+/// so apps can list microphones, but note miniaudio's web backend always
+/// captures the system DEFAULT input — per-device selection is not routable on
+/// web, so [MiniAVWebAudioInputContext.configure]'s deviceId is advisory.
 class MiniAVWebAudioInputPlatform implements MiniAudioInputPlatformInterface {
   @override
   Future<List<MiniAVDeviceInfo>> enumerateDevices() async {
     try {
       final constraints = web.MediaStreamConstraints(audio: true.toJS);
-
-      // Request permission to access audio devices
+      // Prompt for permission so device labels are populated.
       await web.window.navigator.mediaDevices.getUserMedia(constraints).toDart;
 
-      final devices = await web.window.navigator.mediaDevices
-          .enumerateDevices()
-          .toDart;
+      final devices =
+          await web.window.navigator.mediaDevices.enumerateDevices().toDart;
       final audioDevices = <MiniAVDeviceInfo>[];
-
       for (final device in devices.toDart) {
         if (device.kind == 'audioinput') {
           audioDevices.add(
@@ -23,12 +29,11 @@ class MiniAVWebAudioInputPlatform implements MiniAudioInputPlatformInterface {
               name: device.label.isNotEmpty
                   ? device.label
                   : 'Microphone ${audioDevices.length + 1}',
-              isDefault: audioDevices.isEmpty, // First device as default
+              isDefault: audioDevices.isEmpty,
             ),
           );
         }
       }
-
       return audioDevices;
     } catch (e) {
       return [];
@@ -37,31 +42,31 @@ class MiniAVWebAudioInputPlatform implements MiniAudioInputPlatformInterface {
 
   @override
   Future<List<MiniAVAudioInfo>> getSupportedFormats(String deviceId) async {
-    // Web Audio API typically supports these formats
+    // miniaudio's web backend delivers f32; report the common rates.
     return [
       MiniAVAudioInfo(
         format: MiniAVAudioFormat.f32,
-        sampleRate: 44100,
-        channels: 1,
-        numFrames: 1024,
-      ),
-      MiniAVAudioInfo(
-        format: MiniAVAudioFormat.f32,
-        sampleRate: 44100,
-        channels: 2,
-        numFrames: 1024,
-      ),
-      MiniAVAudioInfo(
-        format: MiniAVAudioFormat.f32,
         sampleRate: 48000,
         channels: 1,
-        numFrames: 1024,
+        numFrames: 256,
       ),
       MiniAVAudioInfo(
         format: MiniAVAudioFormat.f32,
         sampleRate: 48000,
         channels: 2,
-        numFrames: 1024,
+        numFrames: 256,
+      ),
+      MiniAVAudioInfo(
+        format: MiniAVAudioFormat.f32,
+        sampleRate: 44100,
+        channels: 1,
+        numFrames: 256,
+      ),
+      MiniAVAudioInfo(
+        format: MiniAVAudioFormat.f32,
+        sampleRate: 44100,
+        channels: 2,
+        numFrames: 256,
       ),
     ];
   }
@@ -70,84 +75,101 @@ class MiniAVWebAudioInputPlatform implements MiniAudioInputPlatformInterface {
   Future<MiniAVAudioInfo> getDefaultFormat(String deviceId) async {
     return MiniAVAudioInfo(
       format: MiniAVAudioFormat.f32,
-      sampleRate: 44100,
+      sampleRate: 48000,
       channels: 1,
-      numFrames: 1024,
+      // Low-latency default: on the worklet the device runs at the 128-frame
+      // quantum regardless; on the ScriptProcessor fallback this is the period.
+      numFrames: 256,
     );
   }
 
   @override
   Future<MiniAudioInputContextPlatformInterface> createContext() async {
-    return MiniAVWebAudioInputContext();
+    await wasm.MiniavWasm.instance.ensureLoaded();
+    final handle = wasm.MiniavWasm.instance.createInput();
+    if (handle == 0) {
+      throw Exception('Failed to create audio input context (wasm).');
+    }
+    return MiniAVWebAudioInputContext._(handle);
   }
+
+  static final _WebDeviceChangeWatcher _watcher = _WebDeviceChangeWatcher(
+    kind: 'audioinput',
+    deviceFactory: (info, isDefault) => MiniAVDeviceInfo(
+      deviceId: info.deviceId,
+      name: info.label.isNotEmpty ? info.label : 'Microphone',
+      isDefault: isDefault,
+    ),
+  );
+
+  @override
+  void Function() addDeviceChangeListener(
+    MiniAVDeviceChangeListener listener,
+  ) => _watcher.add(listener);
 }
 
-/// Web implementation of [MiniAudioInputContextPlatformInterface]
+/// Web implementation of [MiniAudioInputContextPlatformInterface].
 class MiniAVWebAudioInputContext
     implements MiniAudioInputContextPlatformInterface {
-  web.MediaStream? _mediaStream;
-  web.AudioContext? _audioContext;
-  web.MediaStreamAudioSourceNode? _sourceNode;
-  web.ScriptProcessorNode? _processorNode;
-  StreamController<MiniAVBuffer>? _bufferController;
+  MiniAVWebAudioInputContext._(this._handle);
 
-  MiniAVAudioInfo? _currentFormat;
-  void Function(MiniAVBuffer buffer, dynamic userData)? _onData;
-  dynamic _userData;
+  int _handle;
+  bool _destroyed = false;
+
+  int _sampleRate = 48000;
+  int _channels = 1;
+  int _numFrames = 256; // requested buffer size (frames per callback)
+  MiniAVAudioInfo? _format;
+
+  Timer? _pollTimer;
+  void Function(MiniAVBuffer buffer, Object? userData)? _onData;
+  Object? _userData;
+
+  wasm.MiniavWasm get _w => wasm.MiniavWasm.instance;
+
+  @override
+  void Function() addLostListener(MiniAVContextLostListener listener) => () {};
 
   @override
   Future<void> configure(String deviceId, MiniAVAudioInfo format) async {
-    await destroy();
+    if (_destroyed) throw StateError('Audio input context destroyed.');
+    _sampleRate = format.sampleRate;
+    _channels = format.channels;
+    // Requested buffer size (frames per callback). This becomes the device
+    // period so callbacks arrive at the requested rate — otherwise miniaudio's
+    // Web Audio backend defaults to ~2048 frames (~42.7 ms), halving the
+    // callback rate. 0 => a sane default.
+    _numFrames = format.numFrames > 0 ? format.numFrames : 256;
 
-    // Create constraints using the proper web API types
-    final constraints = web.MediaStreamConstraints(
-      audio: _createAudioConstraints(deviceId, format),
+    // miniaudio's web backend captures the default device; deviceId is
+    // advisory (not routable on web). Force f32 to match the ring ABI.
+    final cfg = _w.configureInput(
+      _handle,
+      MiniAVAudioFormat.f32.index,
+      _sampleRate,
+      _channels,
+      _numFrames,
     );
-
-    try {
-      _mediaStream = await web.window.navigator.mediaDevices
-          .getUserMedia(constraints)
-          .toDart;
-
-      _audioContext = web.AudioContext();
-
-      // Ensure audio context is running
-      if (_audioContext!.state == 'suspended') {
-        await _audioContext!.resume().toDart;
-      }
-
-      _sourceNode = _audioContext!.createMediaStreamSource(_mediaStream!);
-      _processorNode = _audioContext!.createScriptProcessor(
-        format.numFrames,
-        format.channels,
-        format.channels,
-      );
-
-      _currentFormat = format;
-    } catch (e) {
-      throw Exception('Failed to configure audio: $e');
+    if (cfg != wasm.kSuccess) {
+      throw Exception('Failed to configure audio input (wasm): $cfg');
     }
-  }
-
-  JSAny _createAudioConstraints(String deviceId, MiniAVAudioInfo format) {
-    final constraints = <String, dynamic>{
-      'sampleRate': {'ideal': format.sampleRate},
-      'channelCount': {'ideal': format.channels},
-    };
-
-    if (deviceId.isNotEmpty) {
-      constraints['deviceId'] = {'exact': deviceId};
+    final en = _w.enableBufferedCapture(_handle, 0); // 0 => ~200 ms ring
+    if (en != wasm.kSuccess) {
+      throw Exception('Failed to enable buffered capture (wasm): $en');
     }
-
-    return constraints.jsify()!;
+    _format = MiniAVAudioInfo(
+      format: MiniAVAudioFormat.f32,
+      sampleRate: _sampleRate,
+      channels: _channels,
+      numFrames: _numFrames,
+    );
   }
 
   @override
   Future<MiniAVAudioInfo> getConfiguredFormat() async {
-    if (_currentFormat == null) {
-      throw StateError('Audio context not configured');
-    }
-    return _currentFormat!;
+    final f = _format;
+    if (f == null) throw StateError('Audio input not configured.');
+    return f;
   }
 
   @override
@@ -155,107 +177,107 @@ class MiniAVWebAudioInputContext
     void Function(MiniAVBuffer buffer, Object? userData) onData, {
     Object? userData,
   }) async {
-    if (_mediaStream == null ||
-        _audioContext == null ||
-        _sourceNode == null ||
-        _processorNode == null) {
-      throw StateError('Audio not configured');
+    if (_destroyed) throw StateError('Audio input context destroyed.');
+    await stopCapture(); // idempotent restart
+
+    // Gesture-critical: prime the mic permission from THIS call stack (which
+    // should be a user gesture) BEFORE the C StartCapture. This grants the
+    // origin permission; miniaudio's own internal getUserMedia then succeeds
+    // without a second prompt. We immediately release our priming stream so we
+    // don't hold a redundant capture.
+    try {
+      final stream = await web.window.navigator.mediaDevices
+          .getUserMedia(web.MediaStreamConstraints(audio: true.toJS))
+          .toDart;
+      for (final track in stream.getTracks().toDart) {
+        track.stop();
+      }
+    } catch (e) {
+      throw Exception('Microphone permission denied or unavailable: $e');
     }
 
-    await stopCapture(); // Clean up any previous capture
-
-    _bufferController = StreamController<MiniAVBuffer>();
     _onData = onData;
     _userData = userData;
 
-    // Set up the audio processing callback using JS interop
-    _processorNode!.onaudioprocess = _createAudioProcessCallback();
-
-    // Connect the audio processing chain
-    _sourceNode!.connect(_processorNode!);
-    _processorNode!.connect(_audioContext!.destination);
-  }
-
-  JSFunction _createAudioProcessCallback() {
-    return (web.AudioProcessingEvent event) {
-      _processAudioBuffer(event);
-    }.toJS;
-  }
-
-  void _processAudioBuffer(web.AudioProcessingEvent event) {
-    if (_onData == null) return;
-
-    try {
-      final inputBuffer = event.inputBuffer;
-      final numChannels = inputBuffer.numberOfChannels;
-      final frameCount = inputBuffer.length;
-
-      // Interleave audio data if multiple channels
-      final totalSamples = frameCount * numChannels;
-      final interleavedData = Float32List(totalSamples);
-
-      for (int channel = 0; channel < numChannels; channel++) {
-        final channelData = inputBuffer.getChannelData(channel).toDart;
-        for (int frame = 0; frame < frameCount; frame++) {
-          interleavedData[frame * numChannels + channel] = channelData[frame];
-        }
-      }
-
-      final audioInfo = MiniAVAudioInfo(
-        format: MiniAVAudioFormat.f32,
-        sampleRate: inputBuffer.sampleRate.toInt(),
-        channels: numChannels,
-        numFrames: frameCount,
-      );
-
-      final audioBuffer = MiniAVAudioBuffer(
-        frameCount: frameCount,
-        info: audioInfo,
-        data: Uint8List.view(interleavedData.buffer),
-      );
-
-      final buffer = MiniAVBuffer(
-        type: MiniAVBufferType.audio,
-        contentType: MiniAVBufferContentType.cpu,
-        timestampUs: _WebUtils._getCurrentTimestampUs(),
-        data: audioBuffer,
-        dataSizeBytes: interleavedData.lengthInBytes,
-      );
-
-      try {
-        _onData!(buffer, _userData);
-      } catch (e, s) {
-        print('Error in audio user callback: $e\n$s');
-      }
-    } catch (e) {
-      // Handle audio processing errors silently or log them
+    // Under the AudioWorklet build this suspends until the worklet thread is up
+    // (ASYNCIFY), so it is awaited. The mic then warms up asynchronously.
+    final res = await _w.startCapture(_handle);
+    if (res != wasm.kSuccess) {
+      _onData = null;
+      _userData = null;
+      throw Exception('Failed to start audio capture (wasm): $res');
     }
+
+    // Poll the ring ~every 5 ms and deliver whatever has accumulated, in
+    // buffers of the configured size. With the AudioWorklet build a small
+    // period (~256 frames ≈ 5.3 ms) is glitch-free (it's off the main thread),
+    // so this poll is the delivery-cadence floor (~browser 4-5 ms timer). The
+    // ring is empty for the first few ms (mic warm-up) — we deliver nothing
+    // until frames appear, no silence synthesis.
+    final chunk = _numFrames > 0 ? _numFrames : 256;
+    _pollTimer = Timer.periodic(const Duration(milliseconds: 5), (_) {
+      if (_destroyed || _onData == null) return;
+      // Drain to empty each tick so a slow tick can't leave a backlog.
+      while (true) {
+        final avail = _w.availableCaptureFrames(_handle);
+        if (avail == 0) break;
+        final want = avail < chunk ? avail : chunk;
+        final f32 = _w.readCaptureFrames(_handle, want, _channels);
+        final frames = f32.isEmpty ? 0 : f32.length ~/ _channels;
+        if (frames == 0) break;
+        try {
+          _onData!(_buildBuffer(f32, frames), _userData);
+        } catch (e, s) {
+          print('Error in audio input user callback: $e\n$s');
+        }
+        if (frames < want) break; // fully drained
+      }
+    });
+  }
+
+  MiniAVBuffer _buildBuffer(Float32List f32, int frames) {
+    final info = MiniAVAudioInfo(
+      format: MiniAVAudioFormat.f32,
+      sampleRate: _sampleRate,
+      channels: _channels,
+      numFrames: frames,
+    );
+    final audio = MiniAVAudioBuffer(
+      frameCount: frames,
+      info: info,
+      data: Uint8List.view(
+        f32.buffer,
+        f32.offsetInBytes,
+        frames * _channels * 4,
+      ),
+    );
+    return MiniAVBuffer(
+      type: MiniAVBufferType.audio,
+      contentType: MiniAVBufferContentType.cpu,
+      timestampUs: _WebUtils._getCurrentTimestampUs(),
+      data: audio,
+      dataSizeBytes: frames * _channels * 4,
+    );
   }
 
   @override
   Future<void> stopCapture() async {
-    _processorNode?.disconnect();
-    _sourceNode?.disconnect();
-
-    // Clear the callback
-    if (_processorNode != null) {
-      _processorNode!.onaudioprocess = null;
-    }
-
-    _bufferController?.close();
-    _bufferController = null;
+    _pollTimer?.cancel();
+    _pollTimer = null;
     _onData = null;
     _userData = null;
+    if (!_destroyed) _w.stopCapture(_handle);
   }
 
   @override
   Future<void> destroy() async {
-    _mediaStream?.getTracks().toDart.forEach((track) => track.stop());
-    _mediaStream = null;
-
-    await _audioContext?.close().toDart;
-    _audioContext = null;
-    _sourceNode = null;
-    _processorNode = null;
+    if (_destroyed) return;
+    _destroyed = true;
+    _pollTimer?.cancel();
+    _pollTimer = null;
+    _onData = null;
+    _userData = null;
+    _w.destroyInput(_handle);
+    _handle = 0;
   }
 }

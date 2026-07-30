@@ -1,0 +1,39 @@
+name: player
+description: >
+  Cross-platform E2E for miniav_player. Runs on BOTH web and native from one
+  codebase: synthetic A/V → encode via the MiniAVTools facade (WebCodecs on
+  web, FFmpeg on native) → in-process packet loopback → MiniavPlayer (decode →
+  GPU YUV→RGBA → minigpu_view zero-copy present + miniaudio playback). On
+  native it also exposes Phase-2 container modes (live fMP4 stream / MP4 file
+  with seek). Self-verifying: prints a PLAYER-SMOKE marker (and on native
+  writes player_smoke_result_<mode>.json + exits 0/1).
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.11.4
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  miniav_player: ^0.1.0
+  miniav_tools: 0.5.2
+  miniav_tools_platform_interface: 0.5.2
+  # Web codec backend (WebCodecs) — pulled by the player's conditional import.
+  miniav_tools_codecs: 0.5.2
+  # Native container/muxer + display-adapter binding for the Phase-2 modes.
+  # Guarded behind a conditional import so the web build never touches dart:io.
+  miniav_tools_ffmpeg: 0.5.2
+  minigpu: ^1.5.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    # Tiny known-good H.264/MP4 (yuv420p) for the web MSE playback demo.
+    - assets/mse_demo.mp4

@@ -1,0 +1,28 @@
+name: screenshare_mp4
+description: >
+  Screenshare → MP4 example: miniav screen capture with zero-copy GPU path
+  (D3D11 texture handoff) encoded to H.264 via FFmpeg and muxed to MP4.
+publish_to: none
+
+environment:
+  sdk: ^3.11.4
+
+dependencies:
+  # miniav screen capture
+  miniav: ^0.5.10
+  miniav_ffi: ^0.5.10
+  miniav_platform_interface: ^0.5.10
+
+  # codec + muxer facade + FFmpeg backend
+  miniav_tools: ^0.1.0
+  miniav_tools_ffmpeg: ^0.1.0
+  miniav_tools_platform_interface: ^0.1.0
+
+  # GPU colour-space conversion + D3D11 texture import
+  miniav_tools_codecs: ^0.1.0
+  minigpu: ^1.5.7
+
+  ffi: ^2.1.4
+
+dev_dependencies:
+  test: ^1.25.0
